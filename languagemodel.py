@@ -18,7 +18,8 @@ class LanguageModel:
         torch.manual_seed(123)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = GPTModel(cfg=gpt_config)
+        self.config = gpt_config
+        self.model = GPTModel(cfg=self.config)
         self.optimizer = torch.optim.AdamW(
                          self.model.parameters(),
                          lr=0.0004, weight_decay=0.1
@@ -63,6 +64,28 @@ class LanguageModel:
             self.save_the_model()
 
         return train_losses, val_losses, track_tokens_seen
+
+    def fine_tune(self):
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        torch.manual_seed(123)
+
+        num_classes = 2
+
+        self.model.out_head = torch.nn.Linear(
+                in_features=self.config["emb_dim"],
+                out_features=num_classes
+                )
+
+        for param in self.model.trf_blocks[-1].parameters():
+            param.requires_grad = True
+        for param in self.model.final_norm.parameters():
+            param.requires_grad = True
+
+        
+        
+
 
 
 

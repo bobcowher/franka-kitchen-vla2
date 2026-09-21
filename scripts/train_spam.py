@@ -18,8 +18,6 @@ train_dataset = SpamDataset(
         max_length=None,
         tokenizer=tokenizer)
 
-print(train_dataset.max_length)
-
 val_dataset = SpamDataset(
         csv_file="data/validation.csv",
         max_length=train_dataset.max_length,
@@ -57,14 +55,14 @@ test_loader = DataLoader(
         drop_last=False
         )
 
-for input_batch, target_batch in train_loader:
+# for input_batch, target_batch in train_loader:
+#
+#     print("Input batch dimensions:", input_batch.shape)
+#     print("Label batch dimensions", target_batch.shape)
 
-    print("Input batch dimensions:", input_batch.shape)
-    print("Label batch dimensions", target_batch.shape)
-
-print(f"{len(train_loader)} training batches")
-print(f"{len(val_loader)} validation batches")
-print(f"{len(test_loader)} test batches")
+# print(f"{len(train_loader)} training batches")
+# print(f"{len(val_loader)} validation batches")
+# print(f"{len(test_loader)} test batches")
 
 CHOOSE_MODEL = "gpt2-small (124M)"
 INPUT_PROMPT = "Every effort moves"
@@ -102,7 +100,10 @@ text_2 = (
 
 model.load_the_model("checkpoints/gpt.pth")
 
-model.generate_and_print_sample(start_context=text_2)
+model.fine_tune()
+
+# model.generate_and_print_sample(start_context=text_2)
+
 
 
 # token_ids = model.generate_text_simple(idx=model.text_to_token_ids(text_1, tokenizer),
