@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from languagemodel import LanguageModel
 from dataset import SpamDataset
 
 tokenizer = tiktoken.get_encoding("gpt2")
@@ -82,3 +83,37 @@ model_configs = {
 "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},
 }
 BASE_CONFIG.update(model_configs[CHOOSE_MODEL])
+
+model = LanguageModel(gpt_config=BASE_CONFIG, 
+                      train_loader=train_loader, 
+                      val_loader=val_loader
+                      )
+
+
+text_1 = "Every effort moves you"
+
+# model.generate_and_print_sample(start_context=text_1)
+
+text_2 = (
+    "Is the following text 'spam'? Answer with 'yes' or 'no':"
+    " 'You are a winner you have been specially"
+    " selected to receive $1000 cash or a $2000 award.'"
+    )
+
+model.load_the_model("checkpoints/gpt.pth")
+
+model.generate_and_print_sample(start_context=text_2)
+
+
+# token_ids = model.generate_text_simple(idx=model.text_to_token_ids(text_1, tokenizer),
+#                                        max_new_tokens=15,
+#                                        context_size=BASE_CONFIG["context_length"])
+#
+
+# model.train(num_epochs=num_epochs,
+#             eval_freq=5,
+#             eval_iter=5,
+#             start_context="Every effort moves you")
+
+
+
