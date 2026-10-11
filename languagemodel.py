@@ -3,6 +3,7 @@ import tiktoken
 import numpy as np
 from models import GPTModel
 import os
+import matplotlib.pyplot as plt
 
 
 # TEMP: GPT-2 weight loading helpers
@@ -64,6 +65,53 @@ class LanguageModel:
             self.save_the_model()
 
         return train_losses, val_losses, track_tokens_seen
+    
+    def train_classifier_simple(self, num_epochs, eval_freq, eval_iter):
+
+        train_losses, val_losses, train_accs, val_accs = [], [], [], []
+        examples_seen, global_step = 0, -1
+
+        for epoch in range(num_epochs):
+            self.model.train()
+
+            for input_batch, target_batch in self.train_loader:
+                self.optimizer.zero_grad()
+                loss = self.calc_loss_batch(input_batch, target_batch)
+                loss.backward()
+                self.optimizer.step()
+                examples_seen += input_batch.numel()
+                global_step += 1
+
+                if global_step % eval_freq == 0:
+                    train_loss, val_loss = self.evaluate_model(eval_iter)
+                    train_losses.append(train_loss)
+                    val_losses.append(val_loss)
+                    print(f"Ep {epoch+1} (Step {global_step:06d}): "
+                          f"Train loss {train_loss:.3f}, "
+                          f"Val loss {val_loss:.3f}"
+                          )
+
+                    self.save_the_model()
+
+                    train_accuracy = self.calc_accuracy_loader(
+                            self.train_loader, num_batches=eval_iter
+                            )
+
+                    val_accuracy = self.calc_accuracy_loader(
+                            self.val_loader, num_batches=eval_iter
+                            )
+
+                    print(f"Train accuracy at epoch {epoch}: {train_accuracy:.3f}")
+                    print(f"Val accuracy at epoch {epoch}: {val_accuracy:.3f}")
+                    
+                    train_accs.append(train_accuracy)
+                    val_accs.append(val_accuracy)
+
+        return train_losses, val_losses, train_accs, val_accs, examples_seen 
+
+
+
+
 
     def fine_tune(self):
         for param in self.model.parameters():
@@ -85,10 +133,6 @@ class LanguageModel:
 
         
         
-
-
-
-
     def save_the_model(self, checkpoint_path=None):
         if checkpoint_path == None:
             checkpoint_path = self.checkpoint_path
@@ -161,19 +205,20 @@ class LanguageModel:
         encoded_tensor = torch.tensor(encoded).unsqueeze(0)
         return encoded_tensor
 
+
     def token_ids_to_text(self, token_ids, tokenizer):
         flat = token_ids.squeeze(0)
         return tokenizer.decode(flat.tolist())
+
 
     def calc_loss_batch(self, input_batch, target_batch):
         input_batch = input_batch.to(self.device)
         target_batch = target_batch.to(self.device)
 
-        logits = self.model(input_batch)
-        loss = torch.nn.functional.cross_entropy(
-                logits.flatten(0, 1), target_batch.flatten()
-                )
+        logits = self.model(input_batch)[:, -1, :]
+        loss = torch.nn.functional.cross_entropy(logits, target_batch)
         return loss
+
 
     def calc_loss_loader(self, data_loader, num_batches=None):
         total_loss = 0.
@@ -192,6 +237,34 @@ class LanguageModel:
             else:
                 break
         return total_loss / num_batches
+
+
+    def calc_accuracy_loader(self, data_loader, num_batches=None):
+        self.model.eval()
+        correct_predictions, num_exampels = 0, 0
+
+        if num_batches is None:
+            num_batches = len(data_loader)
+        else:
+            num_batches = min(num_batches, len(data_loader))
+
+        for i, (input_batch, target_batch) in enumerate(data_loader):
+            if i < num_batches:
+                input_batch = input_batch.to(self.device)
+                target_batch = target_batch.to(self.device)
+
+                with torch.no_grad():
+                    logits = self.model(input_batch)[:, -1, :] # Logits of last output token.
+                predicted_labels = torch.argmax(logits, dim=-1)
+
+                num_exampels += predicted_labels.shape[0]
+                correct_predictions += (
+                        (predicted_labels == target_batch).sum().item()
+                        )
+            else:
+                break
+
+        return correct_predictions / num_exampels
 
 
     def evaluate_model(self, eval_iter):
@@ -215,6 +288,31 @@ class LanguageModel:
         decoded_text = self.token_ids_to_text(token_ids, self.tokenizer)
         print(decoded_text.replace("\n", " "))
         self.model.train()
+
+    def plot_values(self,
+                    epochs_seen,
+                    examples_seen,
+                    train_values,
+                    val_values,
+                    label="loss"):
+        fig, ax1 = plt.subplots(figsize=(5,3))
+
+        ax1.plot(epochs_seen, train_values, label=f"Training {label}")
+        ax1.plot(
+                epochs_seen, val_values, linestyle="-.",
+                label=f"Validation {label}"
+                )
+        ax1.set_xlabel("Epochs")
+        ax1.set_ylabel(label.capitalize())
+        ax1.legend()
+
+        ax2 = ax1.twiny()
+        ax2.plot(examples_seen, train_values, alpha=0)
+        ax2.set_xlabel("Examples seen")
+
+        fig.tight_layout()
+        plt.savefig(f"{label}-plot.pdf")
+        plt.show()
 
 
     # TEMP: load pretrained OpenAI GPT-2 weights from gpt_download.download_and_load_gpt2

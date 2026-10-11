@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+import matplotlib.pyplot as plt
 
 class GPTModel(nn.Module):
     def __init__(self, cfg):
@@ -192,3 +193,5 @@ def calc_accuracy_loader(data_loader, model, device, num_batches=None):
             break
 
     return correct_predictions / num_exampels
+
+
