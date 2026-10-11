@@ -166,8 +166,17 @@ language_model.plot_values(epochs_seen=epochs_tensor,
                            train_values=train_accs,
                            val_values=val_accs,
                            label="accuracy")
+text_1 = (
+"You are a winner you have been specially"
+" selected to receive $1000 cash or a $2000 award."
+)
+print(language_model.classify_review(text_1, max_length=train_dataset.max_length))
 
-
+text_2 = (
+"Hey, just wanted to check if we're still on"
+" for dinner tonight? Let me know!"
+)
+print(language_model.classify_review(text_2, max_length=train_dataset.max_length))
 
     # def plot_values(self,
     #                 epochs_seen,

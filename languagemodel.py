@@ -65,7 +65,8 @@ class LanguageModel:
             self.save_the_model()
 
         return train_losses, val_losses, track_tokens_seen
-    
+
+
     def train_classifier_simple(self, num_epochs, eval_freq, eval_iter):
 
         train_losses, val_losses, train_accs, val_accs = [], [], [], []
@@ -106,6 +107,8 @@ class LanguageModel:
                     
                     train_accs.append(train_accuracy)
                     val_accs.append(val_accuracy)
+
+        self.save_the_model(checkpoint_path="checkpoints/review_classifier.pth")
 
         return train_losses, val_losses, train_accs, val_accs, examples_seen 
 
@@ -199,6 +202,29 @@ class LanguageModel:
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+
+    def classify_review(self, text, max_length=None, pad_token_id=50256):
+        self.model.eval()
+
+        input_ids = self.tokenizer.encode(text)
+        supported_context_length = self.model.pos_emb.weight.shape[0]
+
+        input_ids = input_ids[:min(max_length, supported_context_length)]
+
+        input_ids += [pad_token_id] * (max_length - len(input_ids))
+
+        input_tensor = torch.tensor(input_ids, device=self.device).unsqueeze(0)
+
+        with torch.no_grad():
+            logits = self.model(input_tensor)[:, -1, :]
+
+        print(logits)
+
+        predicted_label = torch.argmax(logits, dim=-1).item()
+        print(predicted_label)
+        return "spam" if predicted_label == 1 else "not spam"
+
+
 
     def text_to_token_ids(self, text, tokenizer):
         encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
@@ -312,7 +338,7 @@ class LanguageModel:
 
         fig.tight_layout()
         plt.savefig(f"{label}-plot.pdf")
-        plt.show()
+        # plt.show()
 
 
     # TEMP: load pretrained OpenAI GPT-2 weights from gpt_download.download_and_load_gpt2
