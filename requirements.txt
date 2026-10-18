@@ -1,3 +1,8 @@
 tiktoken
 tensorflow
 pandas
+transformers
+torch
+torchvision
+pillow
+num2words

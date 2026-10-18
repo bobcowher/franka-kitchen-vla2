@@ -1,31 +1,6 @@
-
-GPT_CONFIG_124M = {
-        "vocab_size": 50257,
-        "context_length": 256, # should be 1024
-        "emb_dim": 768,
-        "n_heads": 12,
-        "n_layers": 12,
-        "drop_rate": 0.1,
-        "qkv_bias": False
+SMOLVLM2_CONFIG_500M = {
+        "model_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+        "dtype": "bfloat16",
+        "emb_dim": 960,
+        "n_layers": 32,
         }
-
-GPT_CONFIG_406M = {
-        "vocab_size": 50257,
-        "context_length": 1024,
-        "emb_dim": 1024,
-        "n_heads": 16,
-        "n_layers": 24,
-        "drop_rate": 0.1,
-        "qkv_bias": False
-        }
-
-GPT_CONFIG_838M = {
-        "vocab_size": 50257,
-        "context_length": 1024,
-        "emb_dim": 1280,
-        "n_heads": 20,
-        "n_layers": 36,
-        "drop_rate": 0.1,
-        "qkv_bias": False
-        }
-
