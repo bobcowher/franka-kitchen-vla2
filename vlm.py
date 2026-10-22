@@ -21,6 +21,21 @@ class VisionLanguageModel:
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
 
 
+    def configure_model(self, num_actions):
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        torch.manual_seed(123)
+
+        self.model.lm_head = torch.nn.Linear(
+                in_features=self.config["emb_dim"],
+                out_features=num_actions,
+                dtype=torch.bfloat16
+                )
+
+        self.model.to(self.device)
+
+
     def save_the_model(self, checkpoint_path=None):
         if checkpoint_path == None:
             checkpoint_path = self.checkpoint_path
