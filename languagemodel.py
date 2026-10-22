@@ -124,7 +124,7 @@ class LanguageModel:
 
         num_classes = 2
 
-        self.model.out_head = torch.nn.Linear(
+        self.model.lm_head = torch.nn.Linear(
                 in_features=self.config["emb_dim"],
                 out_features=num_classes
                 )

@@ -1,6 +1,8 @@
 import os
 import torch
+import torch.nn.functional as F
 from transformers import AutoProcessor, AutoModelForImageTextToText
+
 
 
 class VisionLanguageModel:
@@ -51,6 +53,38 @@ class VisionLanguageModel:
 
         self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
         print(f"Successfully loaded weights from {checkpoint_path}")
+
+
+    @torch.no_grad
+    def get_action(self, image, prompt):
+        logits = self.get_action_logits(image, prompt)
+    
+        action = torch.clamp(logits, -1, 1)
+
+        return action
+
+    def get_action_logits(self, image, prompt):
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+                ],
+            }]
+        text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+        inputs = self.processor(text=text, images=[image], return_tensors="pt")
+        inputs = inputs.to(self.device, dtype=self.model.dtype)
+
+        # print(inputs)
+
+        outputs = self.model(**inputs)
+        logits = outputs.logits[:, -1, :]
+
+        return logits 
+
+
+
+
 
 
     def generate(self, image, prompt, max_new_tokens=64):

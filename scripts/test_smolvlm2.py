@@ -18,3 +18,9 @@ image = Image.new("RGB", (384, 384), "white")
 ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
 
 print(vlm.generate(image, "What color is the square in this image?"))
+
+vlm.configure_model(num_actions=7)
+
+print(vlm.get_action(image, "What color is the square in this image?"))
+
+
