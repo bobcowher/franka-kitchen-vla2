@@ -14,6 +14,9 @@ class VisionLanguageModel:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = vlm_config
         self.processor = AutoProcessor.from_pretrained(self.config["model_id"])
+
+        self.processor.tokenizer.padding_side = "left"
+
         self.model = AutoModelForImageTextToText.from_pretrained(
                 self.config["model_id"],
                 dtype=getattr(torch, self.config["dtype"])
@@ -21,6 +24,7 @@ class VisionLanguageModel:
         self.model.to(self.device)
 
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
+
 
 
     def configure_model(self, num_actions):
