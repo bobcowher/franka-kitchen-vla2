@@ -20,7 +20,7 @@ from gym_robotics_custom import HeldSetpointWrapper, VLAObservationWrapper, ObsR
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import Dataset
-from model import Model
+from vlm import VisionLanguageModel
 from tasks import TASKS, TASK_DESCRIPTIONS, task_index
 
 # The gripper dims (7 and 8, always identical) carry ~8x the variance of the
