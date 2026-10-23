@@ -7,6 +7,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
 from vlm import VisionLanguageModel
+from agent import Agent
+
+agent = Agent(data_path="dataset", name="bc_network")
 
 vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M)
 

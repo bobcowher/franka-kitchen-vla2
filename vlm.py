@@ -67,6 +67,7 @@ class VisionLanguageModel:
 
         return action
 
+
     def get_action_logits(self, image, prompt):
         messages = [{
             "role": "user",
@@ -85,10 +86,6 @@ class VisionLanguageModel:
         logits = outputs.logits[:, -1, :]
 
         return logits 
-
-
-
-
 
 
     def generate(self, image, prompt, max_new_tokens=64):

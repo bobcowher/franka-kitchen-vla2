@@ -23,6 +23,10 @@ from dataset import Dataset
 from vlm import VisionLanguageModel
 from tasks import TASKS, TASK_DESCRIPTIONS, task_index
 
+from PIL import Image, ImageDraw
+from config import SMOLVLM2_CONFIG_500M
+from vlm import VisionLanguageModel
+
 # The gripper dims (7 and 8, always identical) carry ~8x the variance of the
 # average arm joint, so an unweighted mean over all 9 hands them 70% of the loss.
 # 0.125 puts the one gripper dof and the seven arm joints on equal footing.
@@ -59,15 +63,18 @@ class Agent:
 
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-        self.model = Model(image_input_shape=image_input_shape,
-                           joint_pos_dim=joint_pos_dim,
-                           num_actions=num_actions,
-                           task_dim=len(TASK_DESCRIPTIONS),
-                           hidden_dim=756,
-                           n_hidden_layers=3,
-                           name=name).to(self.device)
+        
+        self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M)
 
-        self.optimizer = Adam(self.model.parameters(), learning_rate)
+        # self.model = Model(image_input_shape=image_input_shape,
+        #                    joint_pos_dim=joint_pos_dim,
+        #                    num_actions=num_actions,
+        #                    task_dim=len(TASK_DESCRIPTIONS),
+        #                    hidden_dim=756,
+        #                    n_hidden_layers=3,
+        #                    name=name).to(self.device)
+
+        self.optimizer = Adam(self.vlm.model.parameters(), learning_rate)
 
     def _make_env(self, task, render_mode):
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
