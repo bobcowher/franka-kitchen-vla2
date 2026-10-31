@@ -38,8 +38,16 @@ class VisionLanguageModel:
         if checkpoint_path == None:
             checkpoint_path = self.checkpoint_path
 
-        os.makedirs("checkpoints", exist_ok=True)
-        torch.save(self.model.state_dict(), checkpoint_path)
+        # Only what trains. The frozen backbone is identical to the pretrained
+        # weights from_pretrained loads, so saving it would be ~1 GB of copies.
+        # Selected by requires_grad, like the optimizer, so unfrozen layers or
+        # LoRA adapters land in the checkpoint without editing this.
+        trainable = {name: param.detach().cpu()
+                     for name, param in self.model.named_parameters()
+                     if param.requires_grad}
+
+        os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+        torch.save({"trainable": trainable}, checkpoint_path)
         print(f"Saved model checkpoint at {checkpoint_path}")
 
 
@@ -47,7 +55,16 @@ class VisionLanguageModel:
         if checkpoint_path == None:
             checkpoint_path = self.checkpoint_path
 
-        self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        # strict=False because every frozen param is legitimately missing. A key
+        # the model does not have means the checkpoint is from a different head
+        # or adapter setup, so that still fails.
+        result = self.model.load_state_dict(checkpoint["trainable"], strict=False)
+        if result.unexpected_keys:
+            raise ValueError(
+                f"{checkpoint_path} has parameters this model does not: "
+                f"{result.unexpected_keys}")
         print(f"Successfully loaded weights from {checkpoint_path}")
 
 

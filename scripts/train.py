@@ -25,9 +25,10 @@ ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
 states, _, _, _, tasks = agent.dataset.sample_batch(2)
 images, _, _ = agent.process_observation(states)
 
-green = Image.new("RGB", (224, 224), "white")
-ImageDraw.Draw(green).rectangle([56, 56, 168, 168], fill="green")
-images += [np.array(image.resize((224, 224))), np.array(green)]
+size = agent.image_size
+green = Image.new("RGB", (size, size), "white")
+ImageDraw.Draw(green).rectangle([size // 4, size // 4, 3 * size // 4, 3 * size // 4], fill="green")
+images += [np.array(image.resize((size, size))), np.array(green)]
 tasks  += ["What color is the square in this image?", "Square?"]
 
 batched = vlm.get_action(images, tasks)

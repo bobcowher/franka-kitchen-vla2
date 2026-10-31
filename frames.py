@@ -29,7 +29,7 @@ costs 0.4 ms/step over 256, so matching is close to free.
 import numpy as np
 from PIL import Image
 
-# Even divisors of RENDER_SIZE, dropping those too small to be images. 224 is
+# Even divisors of RENDER_SIZE, dropping those too small to be images. 448 is
 # the VLM target, 128 the small-CNN one, 896 a pass-through. Changing the render
 # size means recomputing the list, not just editing the number.
 RENDER_SIZE = 896
