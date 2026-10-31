@@ -11,12 +11,16 @@ class VisionLanguageModel:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = vlm_config
-        self.processor = AutoProcessor.from_pretrained(self.config["model_id"])
+        self.processor = AutoProcessor.from_pretrained(
+                self.config["model_id"],
+                revision=self.config["revision"]
+                )
 
         self.processor.tokenizer.padding_side = "left"
 
         self.model = AutoModelForImageTextToText.from_pretrained(
                 self.config["model_id"],
+                revision=self.config["revision"],
                 dtype=getattr(torch, self.config["dtype"])
                 )
         
@@ -44,7 +48,7 @@ class VisionLanguageModel:
                      if param.requires_grad}
 
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
-        torch.save({"trainable": trainable}, checkpoint_path)
+        torch.save({"revision": self.config["revision"], "trainable": trainable}, checkpoint_path)
         print(f"Saved model checkpoint at {checkpoint_path}")
 
 
@@ -53,6 +57,11 @@ class VisionLanguageModel:
             checkpoint_path = self.checkpoint_path
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        if checkpoint["revision"] != self.config["revision"]:
+            raise ValueError(
+                f"{checkpoint_path} was trained on revision {checkpoint['revision']}, "
+                f"but this model is {self.config['revision']}")
 
         # strict=False because the frozen params are missing by design.
         result = self.model.load_state_dict(checkpoint["trainable"], strict=False)
