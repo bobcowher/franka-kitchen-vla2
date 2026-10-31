@@ -106,25 +106,4 @@ class VisionLanguageModel:
         outputs = self.model(**inputs)
         logits = outputs.logits[:, -1, :]
 
-        return logits 
-
-
-    def generate(self, image, prompt, max_new_tokens=64):
-        self.model.eval()
-
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": prompt},
-                ],
-            }]
-        text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
-        inputs = self.processor(text=text, images=[image], return_tensors="pt")
-        inputs = inputs.to(self.device, dtype=self.model.dtype)
-
-        with torch.no_grad():
-            token_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
-
-        new_tokens = token_ids[:, inputs["input_ids"].shape[1]:]
-        return self.processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+        return logits

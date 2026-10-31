@@ -55,9 +55,7 @@ class Agent:
         if not eval:
             self.dataset.load_data(path=data_path)
 
-        image_input_shape = obs['camera_scene'].shape
-        joint_pos_dim     = obs['joint_pos'].shape[0]
-        num_actions       = env.action_space.shape[0]
+        num_actions = env.action_space.shape[0]
 
         env.close()
 
