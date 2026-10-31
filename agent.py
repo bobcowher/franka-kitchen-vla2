@@ -6,7 +6,6 @@ import os
 if not os.environ.get("DISPLAY"):
     os.environ.setdefault("MUJOCO_GL", "egl")
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import time
@@ -21,11 +20,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from dataset import Dataset
 from vlm import VisionLanguageModel
-from tasks import TASKS, TASK_DESCRIPTIONS, task_index
+from tasks import TASKS
 
-from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
-from vlm import VisionLanguageModel
 
 # The gripper dims (7 and 8, always identical) carry ~8x the variance of the
 # average arm joint, so an unweighted mean over all 9 hands them 70% of the loss.

@@ -1,5 +1,3 @@
-tiktoken
-pandas
 transformers
 pillow
 
@@ -10,7 +8,6 @@ mujoco==3.11.0
 gymnasium==1.3.0
 gymnasium-robotics==1.4.2
 
-matplotlib
 tensorboard
 termcolor
 h5py
@@ -24,5 +21,4 @@ num2words
 pybullet
 robosuite
 
-transformers
 accelerate
