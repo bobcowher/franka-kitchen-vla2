@@ -27,7 +27,7 @@ class VisionLanguageModel:
         for param in self.model.parameters():
             param.requires_grad = False
 
-        self.model.lm_head = torch.nn.Linear(
+        self.model.lm_head = FP32Linear(
                 in_features=self.config["emb_dim"],
                 out_features=num_actions,
                 dtype=torch.float32
@@ -107,3 +107,9 @@ class VisionLanguageModel:
         logits = outputs.logits[:, -1, :]
 
         return logits
+
+
+
+class FP32Linear(torch.nn.Linear):
+    def forward(self, input):
+        return super().forward(input.float())
