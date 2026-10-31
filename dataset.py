@@ -134,7 +134,7 @@ class Dataset():
                 self.action_memory[batch],
                 self.reward_memory[batch],
                 self.terminal_memory[batch],
-                # The prompt text, not the id: the VLM reads the instruction.
+                # Task description text, not the id: the VLM reads the instruction.
                 list(self.task_description_memory[batch]))
 
 

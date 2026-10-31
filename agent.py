@@ -108,7 +108,7 @@ class Agent:
         summary_writer = SummaryWriter(summary_writer_name)
 
         for epoch in range(epochs):
-            states, actions, _, _, prompts = self.dataset.sample_batch(batch_size)
+            states, actions, _, _, tasks = self.dataset.sample_batch(batch_size)
            
             images, joint_pos, joint_vel = self.process_observation(states)
 
@@ -116,7 +116,7 @@ class Agent:
 
             pred_actions = self.model(obs=images,
                                       joint_pos=joint_pos,
-                                      task=prompts)
+                                      task=tasks)
 
             arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
             gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
