@@ -88,16 +88,17 @@ class Agent:
         joint_pos = obs['joint_pos']
         joint_vel = obs['joint_vel']
 
-        images    = torch.tensor(images, dtype=torch.float32).to(self.device) / 255
         joint_pos = torch.tensor(joint_pos, dtype=torch.float32).to(self.device)
         joint_vel = torch.tensor(joint_vel, dtype=torch.float32).to(self.device)
 
-        if images.dim() == 3:
-            images    = images.unsqueeze(0)
+        # Images stay uint8 HWC numpy for the processor, which moves them to
+        # the GPU itself. A single frame from the env gets a batch dim here.
+        if images.ndim == 3:
+            images    = images[None]
             joint_pos = joint_pos.unsqueeze(0)
             joint_vel = joint_vel.unsqueeze(0)
 
-        return images, joint_pos, joint_vel
+        return list(images), joint_pos, joint_vel
 
 
 
@@ -107,16 +108,15 @@ class Agent:
         summary_writer = SummaryWriter(summary_writer_name)
 
         for epoch in range(epochs):
-            states, actions, _, _, tasks = self.dataset.sample_batch(batch_size)
+            states, actions, _, _, prompts = self.dataset.sample_batch(batch_size)
            
             images, joint_pos, joint_vel = self.process_observation(states)
 
             actions = torch.tensor(actions).to(self.device)
-            tasks   = torch.tensor(tasks).to(self.device)
 
             pred_actions = self.model(obs=images,
                                       joint_pos=joint_pos,
-                                      task=tasks)            
+                                      task=prompts)
 
             arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
             gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
@@ -149,7 +149,7 @@ class Agent:
 
     def test(self, task, render_mode="rgb_array", delay=0):
         env = self._make_env(task, render_mode)
-        task_id = torch.tensor(task_index(TASKS[task])).to(self.device)
+        prompt = TASKS[task]
         obs, _ = env.reset()
         done = trunc = False
         total_reward = 0.0
@@ -159,7 +159,7 @@ class Agent:
             while not (done or trunc):
                 images, joint_pos, joint_vel = self.process_observation(obs)
                 action = self.model(obs=images, joint_pos=joint_pos,
-                                    task=task_id)
+                                    task=[prompt])
                 obs, reward, done, trunc, _ = env.step(action.cpu().numpy().squeeze())
                 total_reward += reward
                 time.sleep(delay)

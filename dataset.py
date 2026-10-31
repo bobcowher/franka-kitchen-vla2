@@ -124,9 +124,8 @@ class Dataset():
         batch = np.random.choice(self.mem_ctr, batch_size)
 
         state = {
-            # NCHW to match Conv2d. Fancy indexing already made a contiguous HWC
-            # copy, so the transpose is a free view over it.
-            "camera_scene": self.camera_scene_memory[batch].transpose(0, 3, 1, 2),
+            # NHWC uint8, which is what the VLM processor takes as-is.
+            "camera_scene": self.camera_scene_memory[batch],
             "joint_pos": self.joint_pos_memory[batch],
             "joint_vel": self.joint_vel_memory[batch],
         }
@@ -135,7 +134,8 @@ class Dataset():
                 self.action_memory[batch],
                 self.reward_memory[batch],
                 self.terminal_memory[batch],
-                self.task_id_memory[batch])
+                # The prompt text, not the id: the VLM reads the instruction.
+                list(self.task_description_memory[batch]))
 
 
 class DatasetShard():
@@ -145,7 +145,8 @@ class DatasetShard():
     episode, and a ring buffer would corrupt it instead of ageing out old data.
 
     Frames go in HWC, straight off the renderer. Do not record through
-    ObsReshapeWrapper -- it hands out NCHW and the arena would reject the shape.
+    ObsReshapeWrapper -- it hands out the reduced training size, not the
+    render size the arena is built for.
 
     Measured over 104 microwave demos: 509 KiB per timestep, 59 steps per demo,
     3.2 GB. Demo length drives the total, not the task count.
