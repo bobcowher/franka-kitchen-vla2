@@ -16,13 +16,8 @@ vlm = agent.vlm
 n_params = sum(p.numel() for p in vlm.model.parameters())
 print(f"Loaded {SMOLVLM2_CONFIG_500M['model_id']} ({n_params/1e6:.0f}M params) on {vlm.device}")
 
-# Synthetic image with a known answer
 image = Image.new("RGB", (384, 384), "white")
 ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
-
-print(vlm.generate(image, "What color is the square in this image?"))
-
-vlm.configure_model(num_actions=9)
 
 # Batch test: two real dataset frames plus two synthetic ones, all uint8 HWC
 # like process_observation hands out. Prompt lengths differ so padding is
@@ -44,17 +39,13 @@ assert batched.shape == (len(images), 9), f"expected {(len(images), 9)}, got {tu
 # 2. Clamped into the normalized action range.
 assert batched.min() >= -1 and batched.max() <= 1, "get_action output escaped [-1, 1]"
 
-# 3. Batch invariance: each sample alone must match its row in the batch.
-#    Compared before the clamp, which would hide a mismatch on saturated dims.
-#    Measured against a random head: left padding differs by <= 0.055 (bf16
-#    noise), right padding by > 2 on every padded sample. The longest prompt
-#    gets no padding, so it passes either way.
-with torch.no_grad():
-    batched_logits = vlm.get_action_logits(images, tasks)
-    for i, (img, task) in enumerate(zip(images, tasks)):
-        alone = vlm.get_action_logits([img], [task])
-        diff = (alone[0].float() - batched_logits[i].float()).abs().max().item()
-        print(f"sample {i}: max |alone - batched| = {diff:.4f}  ({task!r})")
-        assert diff < 0.25, f"sample {i} changes when batched"
+# 3. Batch invariance: each sample alone must match its row in the batch. Right
+#    padding, or reading the wrong position, shows up here as a large diff on
+#    the shorter prompts. bf16 noise alone stays well under the tolerance.
+for i, (img, task) in enumerate(zip(images, tasks)):
+    alone = vlm.get_action([img], [task])
+    diff = (alone[0].float() - batched[i].float()).abs().max().item()
+    print(f"sample {i}: max |alone - batched| = {diff:.4f}  ({task!r})")
+    assert diff < 0.05, f"sample {i} changes when batched"
 
 print("Batch test passed")

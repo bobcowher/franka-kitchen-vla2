@@ -64,17 +64,10 @@ class Agent:
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
         
-        self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M)
+        self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
+                                       num_actions=num_actions)
 
-        # self.model = Model(image_input_shape=image_input_shape,
-        #                    joint_pos_dim=joint_pos_dim,
-        #                    num_actions=num_actions,
-        #                    task_dim=len(TASK_DESCRIPTIONS),
-        #                    hidden_dim=756,
-        #                    n_hidden_layers=3,
-        #                    name=name).to(self.device)
-
-        self.optimizer = Adam(self.vlm.model.parameters(), learning_rate)
+        self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], learning_rate)
 
     def _make_env(self, task, render_mode):
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
