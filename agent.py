@@ -39,11 +39,7 @@ class Agent:
 
     def __init__(self, eval=False, data_path="dataset", name='bc_network'):
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
-        # The VLM processor resizes every frame to 512 (Lanczos) no matter what it
-        # is given. 448 is the largest integer reduction of 896 under that, so
-        # the processor only upsamples 1.14x. Costs 31 GiB for the 56k steps on
-        # file, against 8 GiB at 224.
-        self.image_size = 448
+        self.image_size = 448  # processor resizes to 512; largest integer reduction of 896 below that
         self.native_image_size = 896
         max_buffer_size = 100000
         learning_rate = 0.0001
