@@ -102,6 +102,9 @@ class Agent:
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
+        # Cosine decay to SmolVLA's floor: full lr early to reach the good region, then stop drifting once there.
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs, eta_min=2.5e-6)
+
         for epoch in range(epochs):
             states, actions, _, _, tasks = self.dataset.sample_batch(batch_size)
            
@@ -122,8 +125,10 @@ class Agent:
             loss.backward()
 
             self.optimizer.step()
-            
+            scheduler.step()
+
             if(epoch % 10 == 0):
+                summary_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
