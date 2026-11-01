@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import time
 import datetime
+import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
@@ -32,6 +33,13 @@ GRIPPER_WEIGHT = 0.125
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 EVAL_ROLLOUTS = 3
+
+
+def git_label():
+    """branch_shorthash for run names; the hash pins the exact code even if the branch name is off."""
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
+    return f"{git('branch', '--show-current') or 'detached'}_{git('rev-parse', '--short', 'HEAD') or 'nogit'}"
 
 class Agent:
 
@@ -92,7 +100,7 @@ class Agent:
 
 
     def train(self, epochs, batch_size):
-        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
+        summary_writer_name = f'runs/{git_label()}_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
@@ -129,7 +137,12 @@ class Agent:
             if(epoch and epoch % 1000 == 0):
                 self.eval(epoch, summary_writer)
 
+        self.vlm.save_the_model()
+        self.eval(epochs, summary_writer)
+
     def eval(self, epoch, summary_writer):
+        # Kept per eval so a good point in training can't be overwritten by later saves.
+        self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         for task in EVAL_TASKS:
             rate = sum(self.test(task) for _ in range(EVAL_ROLLOUTS)) / EVAL_ROLLOUTS
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
