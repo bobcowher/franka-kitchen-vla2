@@ -103,7 +103,8 @@ class VisionLanguageModel:
 
 
 
-        inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=False)
+        inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=False,
+                                do_resize=False)
         inputs = inputs.to(self.device, dtype=self.model.dtype)
 
         outputs = self.model(**inputs)

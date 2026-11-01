@@ -33,7 +33,7 @@ class Dataset():
 
     Shards are archived at 896 and reduced to image_size on the way in, which is
     the lever that keeps a large dataset in memory: a step costs 2.30 MiB at 896,
-    588 KiB at 448, 147 KiB at 224, 48 KiB at 128.
+    768 KiB at 512, 588 KiB at 448, 147 KiB at 224, 48 KiB at 128.
     """
 
     def __init__(self, max_size, image_size, n_actions, n_joints=9):

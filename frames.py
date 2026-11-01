@@ -29,11 +29,14 @@ costs 0.4 ms/step over 256, so matching is close to free.
 import numpy as np
 from PIL import Image
 
-# Even divisors of RENDER_SIZE, dropping those too small to be images. 448 is
-# the VLM target, 128 the small-CNN one, 896 a pass-through. Changing the render
+# Even divisors of RENDER_SIZE, dropping those too small to be images. 128 is
+# the small-CNN target, 896 a pass-through. Changing the render
 # size means recomputing the list, not just editing the number.
 RENDER_SIZE = 896
 SUPPORTED_SIZES = (64, 112, 128, 224, 448, 896)
+
+# The one fractional exception: SmolVLM's input size, Lanczos to match its pretraining.
+VLM_SIZE = 512
 
 
 def validate(width, size):
@@ -42,6 +45,9 @@ def validate(width, size):
         raise ValueError(
             f"frames are {width}px but {size}px was asked for. That would mean "
             f"upsampling; work at {width}px or smaller.")
+
+    if size == VLM_SIZE:
+        return
 
     if size not in SUPPORTED_SIZES:
         raise ValueError(
@@ -60,7 +66,7 @@ def resize(frames, size):
     """Reduce camera frames to size x size. Accepts (H,W,3) or (N,H,W,3).
 
     BOX averages over the source pixels each output pixel covers. Upsampling
-    and fractional ratios both raise -- see the module docstring for why the
+    and fractional ratios (other than VLM_SIZE) both raise -- see the module docstring for why the
     ratio has to be integral.
     """
     single = frames.ndim == 3
@@ -77,7 +83,8 @@ def resize(frames, size):
     # 2.8 ms against 0.8 for the same result. The copy costs 0.02 ms.
     frames = np.ascontiguousarray(frames)
 
+    resample = Image.Resampling.LANCZOS if size == VLM_SIZE else Image.Resampling.BOX
     out = np.empty((len(frames), size, size, 3), dtype=np.uint8)
     for i, frame in enumerate(frames):
-        out[i] = np.asarray(Image.fromarray(frame).resize((size, size), Image.BOX))
+        out[i] = np.asarray(Image.fromarray(frame).resize((size, size), resample))
     return out[0] if single else out

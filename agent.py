@@ -18,6 +18,7 @@ from gym_robotics_custom import HeldSetpointWrapper, VLAObservationWrapper, ObsR
 
 from torch.utils.tensorboard import SummaryWriter
 
+import frames
 from dataset import Dataset
 from vlm import VisionLanguageModel
 from tasks import TASKS
@@ -36,7 +37,7 @@ class Agent:
 
     def __init__(self, eval=False, data_path="dataset", name='bc_network'):
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
-        self.image_size = 448  # processor resizes to 512; largest integer reduction of 896 below that
+        self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
         self.native_image_size = 896
         max_buffer_size = 100000
         learning_rate = 0.0001
