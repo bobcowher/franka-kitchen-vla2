@@ -100,14 +100,13 @@ class Agent:
            
             images, joint_pos, joint_vel = self.process_observation(states)
 
-            actions = torch.tensor(actions).to(self.device)
+            actions = torch.tensor(actions).to(self.device).float()
 
-            pred_actions = self.model(obs=images,
-                                      joint_pos=joint_pos,
-                                      task=tasks)
-
-            arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
-            gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
+            pred_actions = self.vlm.get_action_logits(images=images,
+                                                      prompts=tasks)
+    
+            arm_loss     = F.l1_loss(actions[:, :7], pred_actions[:, :7])
+            gripper_loss = F.l1_loss(actions[:, 7:], pred_actions[:, 7:])
 
             loss = arm_loss + GRIPPER_WEIGHT * gripper_loss
 
@@ -124,7 +123,7 @@ class Agent:
 
             if(epoch % 100 == 0):
                 print(f"Epoch: {epoch} Loss: {loss.item()}")
-                self.model.save_checkpoint()
+                self.vlm.save_the_model()
 
             if(epoch and epoch % 1000 == 0):
                 self.eval(epoch, summary_writer)
