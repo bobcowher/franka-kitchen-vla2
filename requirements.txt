@@ -20,5 +20,6 @@ num2words
 
 pybullet
 robosuite
+torchinfo
 
 accelerate
