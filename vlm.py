@@ -31,6 +31,8 @@ class VisionLanguageModel:
         for param in self.model.parameters():
             param.requires_grad = False
 
+        # Trained weights need fp32 so Adam's small updates aren't rounded away; autocast below bridges the dtypes.
+        self.model.model.text_model.layers[-4:].float()
         for param in self.model.model.text_model.layers[-4:].parameters():
             param.requires_grad = True
 
@@ -113,8 +115,10 @@ class VisionLanguageModel:
                                 do_resize=False)
         inputs = inputs.to(self.device, dtype=self.model.dtype)
 
-        outputs = self.model(**inputs)
-        logits = outputs.logits[:, -1, :]
+        # Runs matmuls in bf16 so the fp32 and bf16 layers can mix; gradients still land on fp32 weights.
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            outputs = self.model(**inputs)
+        logits = outputs.logits[:, -1, :].float()
 
         return logits
 

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import time
 import datetime
+import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
@@ -25,10 +26,8 @@ from tasks import TASKS
 
 from config import SMOLVLM2_CONFIG_500M
 
-# The gripper dims (7 and 8, always identical) carry ~8x the variance of the
-# average arm joint, so an unweighted mean over all 9 hands them 70% of the loss.
-# 0.125 puts the one gripper dof and the seven arm joints on equal footing.
-GRIPPER_WEIGHT = 0.125
+# L1 scales with mean absolute deviation, 3.8x higher on the gripper than an arm joint (variance is 7.8x, which suited MSE).
+GRIPPER_WEIGHT = 0.26
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 EVAL_ROLLOUTS = 3
@@ -92,7 +91,10 @@ class Agent:
 
 
     def train(self, epochs, batch_size):
-        summary_writer_name = f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
+        # The commit hash names the exact code that ran, whatever a tool does to the branch name.
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True).stdout.strip() or "nogit"
+        summary_writer_name = f'runs/{commit}_{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}'
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
