@@ -141,16 +141,14 @@ class Agent:
         done = trunc = False
         total_reward = 0.0
 
-        self.model.eval()
-        with torch.no_grad():
-            while not (done or trunc):
-                images, joint_pos, joint_vel = self.process_observation(obs)
-                action = self.model(obs=images, joint_pos=joint_pos,
-                                    task=[prompt])
-                obs, reward, done, trunc, _ = env.step(action.cpu().numpy().squeeze())
-                total_reward += reward
-                time.sleep(delay)
-        self.model.train()
+        self.vlm.model.eval()
+        while not (done or trunc):
+            images, _, _ = self.process_observation(obs)
+            action = self.vlm.get_action(images, [prompt])
+            obs, reward, done, trunc, _ = env.step(action.cpu().numpy().squeeze())
+            total_reward += reward
+            time.sleep(delay)
+        self.vlm.model.train()
 
         env.close()
         return total_reward > 0

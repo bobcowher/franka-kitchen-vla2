@@ -12,4 +12,4 @@ from agent import Agent
 
 agent = Agent(data_path="dataset", name="bc_network")
 
-agent.train(epochs=10, batch_size=64)
+agent.train(epochs=5000, batch_size=64)

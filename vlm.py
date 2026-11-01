@@ -93,7 +93,10 @@ class VisionLanguageModel:
                     {"type": "text", "text": prompt},
                     ],
                 }]
-            text = self.processor.apply_chat_template(messages, add_generation_prompt=True)
+            # Non-empty processor_kwargs stops SmolVLM leaking video kwargs into a warning.
+            text = self.processor.apply_chat_template(
+                messages, add_generation_prompt=True,
+                processor_kwargs={"do_image_splitting": False})
             text_batch.append(text)
         
         image_batch = [[image] for image in images]
