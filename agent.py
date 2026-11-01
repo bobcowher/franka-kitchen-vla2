@@ -39,6 +39,18 @@ def git_label():
         return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
     return f"{git('branch', '--show-current') or 'detached'}_{git('rev-parse', '--short', 'HEAD') or 'nogit'}"
 
+
+# Per-joint min/max over the dataset; fingers (last two) span only 0-0.049 m, so each joint is binned to its own range.
+JOINT_MIN = torch.tensor([-2.9014, -1.7744, -2.3526, -3.0786, -0.7136, -0.0261, -0.0030, -0.0026, -0.0027])
+JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493,  2.5794,  0.0489,  0.0428])
+
+
+def with_joint_state(prompts, joint_pos):
+    """Append joint positions as 0-99 integer bins: ~25 tokens, equal resolution per joint."""
+    lo, hi = JOINT_MIN.to(joint_pos.device), JOINT_MAX.to(joint_pos.device)
+    bins = ((joint_pos - lo) / (hi - lo) * 99).round().clamp(0, 99).int().tolist()
+    return [f"{p}. Joints: {' '.join(map(str, b))}" for p, b in zip(prompts, bins)]
+
 class Agent:
 
     def __init__(self, eval=False, data_path="dataset", name='bc_network'):
@@ -110,7 +122,7 @@ class Agent:
             actions = torch.tensor(actions).to(self.device).float()
 
             pred_actions = self.vlm.get_action_logits(images=images,
-                                                      prompts=tasks)
+                                                      prompts=with_joint_state(tasks, joint_pos))
     
             arm_loss     = F.l1_loss(actions[:, :7], pred_actions[:, :7])
             gripper_loss = F.l1_loss(actions[:, 7:], pred_actions[:, 7:])
@@ -155,8 +167,8 @@ class Agent:
 
         self.vlm.model.eval()
         while not (done or trunc):
-            images, _, _ = self.process_observation(obs)
-            action = self.vlm.get_action(images, [prompt])
+            images, joint_pos, _ = self.process_observation(obs)
+            action = self.vlm.get_action(images, with_joint_state([prompt], joint_pos))
             obs, reward, done, trunc, _ = env.step(action.cpu().numpy().squeeze())
             total_reward += reward
             time.sleep(delay)
