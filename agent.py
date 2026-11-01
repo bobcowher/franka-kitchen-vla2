@@ -26,8 +26,8 @@ from tasks import TASKS
 
 from config import SMOLVLM2_CONFIG_500M
 
-# L1 scales with mean absolute deviation, 3.8x higher on the gripper than an arm joint (variance is 7.8x, which suited MSE).
-GRIPPER_WEIGHT = 0.26
+# 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
+GRIPPER_WEIGHT = 0.125
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 EVAL_ROLLOUTS = 3
