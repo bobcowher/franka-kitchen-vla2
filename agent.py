@@ -47,6 +47,7 @@ class Agent:
         self.native_image_size = 896
         max_buffer_size = 100000
         learning_rate = 0.0001
+        backbone_learning_rate = 0.00001  # pretrained layers move 10x slower so they don't drift off their features
 
         env = self._make_env(EVAL_TASKS[0], render_mode='rgb_array')
         obs, _ = env.reset()
@@ -69,7 +70,11 @@ class Agent:
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
                                        num_actions=num_actions)
 
-        self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], learning_rate)
+        trainable = [(n, p) for n, p in self.vlm.model.named_parameters() if p.requires_grad]
+        self.optimizer = Adam([
+            {"params": [p for n, p in trainable if n.startswith("lm_head.")], "lr": learning_rate},
+            {"params": [p for n, p in trainable if not n.startswith("lm_head.")], "lr": backbone_learning_rate},
+        ])
 
     def _make_env(self, task, render_mode):
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
