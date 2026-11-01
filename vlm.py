@@ -1,6 +1,8 @@
 import os
 import torch
+import torch.nn.functional as F
 from transformers import AutoProcessor, AutoModelForImageTextToText
+import torch.nn as nn
 
 
 class VisionLanguageModel:
@@ -27,11 +29,9 @@ class VisionLanguageModel:
         for param in self.model.parameters():
             param.requires_grad = False
 
-        self.model.lm_head = FP32Linear(
-                in_features=self.config["emb_dim"],
-                out_features=num_actions,
-                dtype=torch.float32
-                )
+
+        self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
+                                                    n_actions=num_actions)
         
         self.model.to(self.device)
 
@@ -117,3 +117,32 @@ class VisionLanguageModel:
 class FP32Linear(torch.nn.Linear):
     def forward(self, input):
         return super().forward(input.float())
+
+class RobotControlOutputHead(nn.Module):
+    
+    def __init__(self,
+                 vla_output_dim,
+                 hidden_dim=756,
+                 n_actions=9
+                 ):
+        super().__init__()
+
+        self.compression_layer = FP32Linear(in_features=vla_output_dim, 
+                                            out_features=hidden_dim,
+                                            dtype=torch.float32)
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, n_actions)
+
+    def forward(self, x):
+        x = F.relu(self.compression_layer(x))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = self.output(x)
+        return x
+
+
+
+
