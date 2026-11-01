@@ -26,9 +26,7 @@ from tasks import TASKS
 
 from config import SMOLVLM2_CONFIG_500M
 
-# The gripper dims (7 and 8, always identical) carry ~8x the variance of the
-# average arm joint, so an unweighted mean over all 9 hands them 70% of the loss.
-# 0.125 puts the one gripper dof and the seven arm joints on equal footing.
+# 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
 GRIPPER_WEIGHT = 0.125
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
