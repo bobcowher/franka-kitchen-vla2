@@ -4,18 +4,16 @@ from pathlib import Path
 # Make the project root importable when run as scripts/<name>.py
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from PIL import Image, ImageDraw
-from config import SMOLVLM2_CONFIG_500M
-from vlm import VisionLanguageModel
+from agent import Agent
+from tasks import task_from_argv
 
-vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M, num_actions=9)
+# Trained on 512 frames; the 448 checkpoint needs the first-training-run branch.
+CHECKPOINT = "checkpoints/smolvlm2-512-step4900.pth"
 
-n_params = sum(p.numel() for p in vlm.model.parameters())
-print(f"Loaded {SMOLVLM2_CONFIG_500M['model_id']} ({n_params/1e6:.0f}M params) on {vlm.device}")
+task = task_from_argv(sys.argv)
 
-image = Image.new("RGB", (384, 384), "white")
-ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
+agent = Agent(eval=True)
+agent.vlm.load_the_model(CHECKPOINT)
 
-print(vlm.get_action([image], ["What color is the square in this image?"]))
-
-
+success = agent.test(task, render_mode="human")
+print(f"{task}: {'success' if success else 'fail'}")
