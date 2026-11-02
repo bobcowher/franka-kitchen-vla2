@@ -22,3 +22,4 @@ pybullet
 robosuite
 
 accelerate
+torchinfo
