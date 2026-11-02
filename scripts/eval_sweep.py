@@ -59,7 +59,7 @@ def run_job(job):
 
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
-subprocess.run(["git", "-C", ROOT, "fetch", "-q", "origin"], check=True)
+subprocess.run(["git", "-C", ROOT, "fetch", "-q", "origin"], check=False)
 snapshot_download(SMOLVLM2_CONFIG_500M["model_id"], revision=SMOLVLM2_CONFIG_500M["revision"])
 for commit in {job[1] for job in JOBS}:
     worktree(commit)
