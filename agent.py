@@ -22,7 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 import frames
 from dataset import Dataset
 from vlm import VisionLanguageModel
-from tasks import TASKS
+from tasks import eval_phrase, sample_phrases
 
 from config import SMOLVLM2_CONFIG_500M
 
@@ -122,7 +122,7 @@ class Agent:
             actions = torch.tensor(actions).to(self.device).float()
 
             pred_actions = self.vlm.get_action_logits(images=images,
-                                                      prompts=with_joint_state(tasks, joint_pos))
+                                                      prompts=with_joint_state(sample_phrases(tasks), joint_pos))
     
             arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
             gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
@@ -154,13 +154,13 @@ class Agent:
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         for task in EVAL_TASKS:
-            rate = sum(self.test(task) for _ in range(EVAL_ROLLOUTS)) / EVAL_ROLLOUTS
+            rate = sum(self.test(task, rollout=i) for i in range(EVAL_ROLLOUTS)) / EVAL_ROLLOUTS
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
             print(f"  eval {task}: {rate:.0%}")
 
-    def test(self, task, render_mode="rgb_array", delay=0):
+    def test(self, task, render_mode="rgb_array", delay=0, rollout=0):
         env = self._make_env(task, render_mode)
-        prompt = TASKS[task]
+        prompt = eval_phrase(task, rollout)
         obs, _ = env.reset()
         done = trunc = False
         total_reward = 0.0
