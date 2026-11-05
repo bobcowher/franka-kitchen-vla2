@@ -126,8 +126,8 @@ class Agent:
             pred_actions = self.vlm.get_action_logits(images=images,
                                                       prompts=with_joint_state(tasks, joint_pos))
     
-            arm_loss     = F.l1_loss(actions[:, :7], pred_actions[:, :7])
-            gripper_loss = F.l1_loss(actions[:, 7:], pred_actions[:, 7:])
+            arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
+            gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
 
             loss = arm_loss + GRIPPER_WEIGHT * gripper_loss
 
