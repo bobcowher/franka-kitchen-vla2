@@ -58,7 +58,7 @@ class Agent:
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
         self.native_image_size = 896
         max_buffer_size = 100000
-        learning_rate = 0.0001
+        learning_rate = 0.00002  # OpenVLA's constant LR; tests whether run 18 needed the decay or just a low LR
 
         env = self._make_env(EVAL_TASKS[0], render_mode='rgb_array')
         obs, _ = env.reset()
