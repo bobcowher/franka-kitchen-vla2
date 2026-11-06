@@ -36,6 +36,11 @@ class VisionLanguageModel:
         for param in self.model.model.text_model.layers[-4:].parameters():
             param.requires_grad = True
 
+        # The connector maps SigLIP features into LLM tokens; training it adapts vision to actions without touching SigLIP.
+        self.model.model.connector.float()
+        for param in self.model.model.connector.parameters():
+            param.requires_grad = True
+
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
                                                     n_actions=num_actions)
         
