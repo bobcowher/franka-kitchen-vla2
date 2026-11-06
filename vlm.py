@@ -36,6 +36,13 @@ class VisionLanguageModel:
         for param in self.model.model.text_model.layers[-4:].parameters():
             param.requires_grad = True
 
+        # Top 4 of 12 SigLIP blocks plus its final norm; the connector stays frozen so this run isolates SigLIP.
+        vision = self.model.model.vision_model
+        for part in (vision.encoder.layers[-4:], vision.post_layernorm):
+            part.float()
+            for param in part.parameters():
+                param.requires_grad = True
+
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
                                                     n_actions=num_actions)
         
