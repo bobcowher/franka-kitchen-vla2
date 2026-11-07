@@ -8,6 +8,7 @@ if not os.environ.get("DISPLAY"):
 
 import torch
 import torch.nn.functional as F
+import math
 import time
 import datetime
 import subprocess
@@ -28,6 +29,9 @@ from config import SMOLVLM2_CONFIG_500M
 
 # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
 GRIPPER_WEIGHT = 0.125
+WARMUP_STEPS = 200
+MIN_LR_FRACTION = 0.1
+GRAD_CLIP = 10.0  # SmolVLA's value
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 EVAL_ROLLOUTS = 3
@@ -126,6 +130,15 @@ class Agent:
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
+        # Linear warmup, then cosine decay to 10% of the peak LR by the last epoch.
+        def lr_factor(epoch):
+            if epoch < WARMUP_STEPS:
+                return (epoch + 1) / WARMUP_STEPS
+            progress = (epoch - WARMUP_STEPS) / max(1, epochs - WARMUP_STEPS)
+            return MIN_LR_FRACTION + (1 - MIN_LR_FRACTION) * 0.5 * (1 + math.cos(math.pi * progress))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_factor)
+        trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
+
         for epoch in range(epochs):
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, CHUNK_SIZE)
            
@@ -145,13 +158,17 @@ class Agent:
             self.optimizer.zero_grad()
 
             loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, GRAD_CLIP)
 
             self.optimizer.step()
+            scheduler.step()
             
             if(epoch % 10 == 0):
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
+                summary_writer.add_scalar("train/grad_norm", grad_norm, epoch)
+                summary_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
 
             if(epoch % 100 == 0):
                 print(f"Epoch: {epoch} Loss: {loss.item()}")
