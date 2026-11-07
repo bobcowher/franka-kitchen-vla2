@@ -8,12 +8,14 @@ from torchinfo import summary
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions):
+    def __init__(self, vlm_config, num_actions, chunk_size=1):
 
         torch.manual_seed(123)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = vlm_config
+        self.num_actions = num_actions
+        self.chunk_size = chunk_size
         self.processor = AutoProcessor.from_pretrained(
                 self.config["model_id"],
                 revision=self.config["revision"]
@@ -36,8 +38,9 @@ class VisionLanguageModel:
         for param in self.model.model.text_model.layers[-4:].parameters():
             param.requires_grad = True
 
+        # One flat output per action in the chunk; get_action_logits reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
-                                                    n_actions=num_actions)
+                                                    n_actions=num_actions * chunk_size)
         
         self.model.to(self.device)
 
@@ -120,7 +123,7 @@ class VisionLanguageModel:
             outputs = self.model(**inputs)
         logits = outputs.logits[:, -1, :].float()
 
-        return logits
+        return logits.view(len(prompts), self.chunk_size, self.num_actions)
 
 
 

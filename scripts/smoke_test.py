@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
-from agent import Agent
+from agent import Agent, CHUNK_SIZE
 
 agent = Agent(data_path="dataset", name="bc_network")
 vlm = agent.vlm
@@ -22,7 +22,7 @@ ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
 # Batch test: two real dataset frames plus two synthetic ones, all uint8 HWC
 # like process_observation hands out. Prompt lengths differ so padding is
 # actually exercised.
-states, _, _, _, tasks = agent.dataset.sample_batch(2)
+states, _, _, tasks = agent.dataset.sample_batch(2)
 images, _, _ = agent.process_observation(states)
 
 size = agent.image_size
@@ -34,8 +34,9 @@ tasks  += ["What color is the square in this image?", "Square?"]
 batched = vlm.get_action(images, tasks)
 print(batched)
 
-# 1. One row of 9 actions per sample.
-assert batched.shape == (len(images), 9), f"expected {(len(images), 9)}, got {tuple(batched.shape)}"
+# 1. One chunk of CHUNK_SIZE x 9 actions per sample.
+expected = (len(images), CHUNK_SIZE, 9)
+assert batched.shape == expected, f"expected {expected}, got {tuple(batched.shape)}"
 
 # 2. Clamped into the normalized action range.
 assert batched.min() >= -1 and batched.max() <= 1, "get_action output escaped [-1, 1]"

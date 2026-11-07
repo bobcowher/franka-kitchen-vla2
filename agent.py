@@ -32,6 +32,10 @@ GRIPPER_WEIGHT = 0.125
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 EVAL_ROLLOUTS = 3
 
+# Action chunking, as in ACT and diffusion policy: predict the next CHUNK_SIZE actions, run the first EXECUTE_STEPS, then look again.
+CHUNK_SIZE = 8
+EXECUTE_STEPS = 4
+
 
 def git_label():
     """branch_shorthash for run names; the hash pins the exact code even if the branch name is off."""
@@ -50,6 +54,12 @@ def with_joint_state(prompts, joint_pos):
     lo, hi = JOINT_MIN.to(joint_pos.device), JOINT_MAX.to(joint_pos.device)
     bins = ((joint_pos - lo) / (hi - lo) * 99).round().clamp(0, 99).int().tolist()
     return [f"{p}. Joints: {' '.join(map(str, b))}" for p, b in zip(prompts, bins)]
+
+def masked_mse(pred, target, mask):
+    """MSE over the chunk steps that exist; mask is 0 for steps past the end of the episode."""
+    per_step = ((pred - target) ** 2).mean(dim=-1)
+    return (per_step * mask).sum() / mask.sum()
+
 
 class Agent:
 
@@ -79,7 +89,9 @@ class Agent:
 
         
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
-                                       num_actions=num_actions)
+                                       num_actions=num_actions,
+                                       chunk_size=CHUNK_SIZE)
+        self.reset_policy()
 
         self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], learning_rate)
 
@@ -115,17 +127,18 @@ class Agent:
         summary_writer = SummaryWriter(summary_writer_name)
 
         for epoch in range(epochs):
-            states, actions, _, _, tasks = self.dataset.sample_batch(batch_size)
+            states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, CHUNK_SIZE)
            
             images, joint_pos, joint_vel = self.process_observation(states)
 
-            actions = torch.tensor(actions).to(self.device).float()
+            actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
+            action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
 
             pred_actions = self.vlm.get_action_logits(images=images,
                                                       prompts=with_joint_state(sample_phrases(tasks), joint_pos))
     
-            arm_loss     = F.mse_loss(actions[:, :7], pred_actions[:, :7])
-            gripper_loss = F.mse_loss(actions[:, 7:], pred_actions[:, 7:])
+            arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
+            gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
 
             loss = arm_loss + GRIPPER_WEIGHT * gripper_loss
 
@@ -158,18 +171,30 @@ class Agent:
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
             print(f"  eval {task}: {rate:.0%}")
 
+    def reset_policy(self):
+        """Forget any queued actions; call at the start of every episode."""
+        self.action_queue = []
+
+    def act(self, images, prompt, joint_pos):
+        """Next action for one env. The model only runs when the queue is empty, i.e. every EXECUTE_STEPS steps."""
+        if not self.action_queue:
+            chunk = self.vlm.get_action(images, with_joint_state([prompt], joint_pos))[0]  # (chunk, 9)
+            self.action_queue = list(chunk[:EXECUTE_STEPS].cpu().numpy())
+        return self.action_queue.pop(0)
+
     def test(self, task, render_mode="rgb_array", delay=0, rollout=0):
         env = self._make_env(task, render_mode)
         prompt = eval_phrase(task, rollout)
         obs, _ = env.reset()
+        self.reset_policy()
         done = trunc = False
         total_reward = 0.0
 
         self.vlm.model.eval()
         while not (done or trunc):
             images, joint_pos, _ = self.process_observation(obs)
-            action = self.vlm.get_action(images, with_joint_state([prompt], joint_pos))
-            obs, reward, done, trunc, _ = env.step(action.cpu().numpy().squeeze())
+            action = self.act(images, prompt, joint_pos)
+            obs, reward, done, trunc, _ = env.step(action)
             total_reward += reward
             time.sleep(delay)
         self.vlm.model.train()

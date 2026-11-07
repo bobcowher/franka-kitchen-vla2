@@ -48,6 +48,8 @@ class Dataset():
         self.terminal_memory = np.zeros(self.mem_size, dtype=bool)
         self.task_description_memory = np.zeros(self.mem_size, dtype=object)
         self.task_id_memory = np.zeros(self.mem_size, dtype=np.int64)
+        # Row index one past the last step of each step's episode; action chunks must not cross it.
+        self.episode_end_memory = np.zeros(self.mem_size, dtype=np.int64)
 
     def __len__(self):
         return self.mem_ctr
@@ -97,6 +99,7 @@ class Dataset():
                 description = str(data['task_description'])
                 self.task_description_memory[index:end] = description
                 self.task_id_memory[index:end] = task_index(description)[0]
+                self.episode_end_memory[index:end] = end  # each shard is one episode
                 index = end
 
         self.mem_ctr = total
@@ -120,8 +123,13 @@ class Dataset():
             raise ValueError(f"{filename}: {e}") from None
         return camera, data
 
-    def sample_batch(self, batch_size):
+    def sample_batch(self, batch_size, chunk_size=1):
+        """Random steps, each with the chunk_size actions starting there. action_mask is False where a chunk runs past its episode."""
         batch = np.random.choice(self.mem_ctr, batch_size)
+        episode_end = self.episode_end_memory[batch][:, None]
+        steps = batch[:, None] + np.arange(chunk_size)  # (batch, chunk) rows of the actions to predict
+        action_mask = steps < episode_end
+        steps = np.minimum(steps, episode_end - 1)  # masked steps still need a valid row to read
 
         state = {
             # NHWC uint8, which is what the VLM processor takes as-is.
@@ -131,9 +139,8 @@ class Dataset():
         }
 
         return (state,
-                self.action_memory[batch],
-                self.reward_memory[batch],
-                self.terminal_memory[batch],
+                self.action_memory[steps],  # (batch, chunk, actions)
+                action_mask,
                 # Task description text, not the id: the VLM reads the instruction.
                 list(self.task_description_memory[batch]))
 
