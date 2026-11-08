@@ -195,9 +195,9 @@ class Agent:
             self.action_queue = list(chunk[:self.execute_steps].cpu().numpy())
         return self.action_queue.pop(0)
 
-    def test(self, task, render_mode="rgb_array", delay=0, rollout=0):
+    def test(self, task, render_mode="rgb_array", delay=0, rollout=0, prompt=None):
         env = self._make_env(task, render_mode)
-        prompt = eval_phrase(task, rollout)
+        prompt = prompt or eval_phrase(task, rollout)
         obs, _ = env.reset()
         self.reset_policy()
         done = trunc = False

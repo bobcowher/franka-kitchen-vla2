@@ -7,8 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from agent import Agent
 from tasks import task_from_argv
 
-# Trained on 512 frames; the 448 checkpoint needs the first-training-run branch.
-CHECKPOINT = "checkpoints/smolvlm2-512-step4900.pth"
+# Checkpoints from before action chunking (run 23 and earlier) need their own branch; the head shape changed.
+CHECKPOINT = "checkpoints/franka-kitchen-vla2-24-smolvlm2-step5000.pth"
 
 task = task_from_argv(sys.argv)
 
