@@ -25,7 +25,7 @@ OUT_DIR = "checkpoints"
 FRAMES_DIR = os.environ.get("DONE_FRAMES", f"{OUT_DIR}/done_frames")
 DATA_PATH = "dataset/slide_cabinet" if SMOKE else "dataset"
 
-COLLECT_ROLLOUTS = 1 if SMOKE else 30  # per task
+COLLECT_ROLLOUTS = 1 if SMOKE else 50  # per task
 TRAIN_STEPS = 3 if SMOKE else 3000
 BATCH_SIZE = 8 if SMOKE else 64
 LEARNING_RATE = 3e-4
@@ -218,6 +218,34 @@ def eval_rollout(agent, task, prompt):
             "complete_after_home": bool(reward > 0)}
 
 
+def home_at_success(agent, task, prompt):
+    """Stop the moment the task succeeds and go home. Returns (succeeded, home steps, still complete), or Nones on failure."""
+    env = make_env(agent, task)
+    obs, _ = env.reset()
+    agent.reset_policy()
+    reward = 0
+    for _ in range(ROLLOUT_LIMIT):
+        obs, reward, _, _, _ = env.step(policy_action(agent, obs, prompt))
+        if reward > 0:
+            break
+    if not reward > 0:
+        env.close()
+        return False, None, None
+    _, home_steps = env.return_to_home()
+    _, reward, _, _, _ = env.step(np.zeros(9))
+    env.close()
+    return True, home_steps, bool(reward > 0)
+
+
+def run_home_test(agent):
+    for task in EVAL_TASKS:
+        results = [home_at_success(agent, task, TASKS[task]) for _ in range(EVAL_ROLLOUTS)]
+        succeeded = [r for r in results if r[0]]
+        kept = sum(r[2] for r in succeeded)
+        most_steps = max((r[1] for r in succeeded), default=0)
+        print(f"home at success, {task}: {kept}/{len(succeeded)} still complete, max {most_steps} home steps", flush=True)
+
+
 def score(row, threshold, patience):
     """What a stop rule would have done: correct, false_stop, miss, or quiet_fail. Returns (outcome, lag from first success)."""
     streak = 0
@@ -294,6 +322,7 @@ def main():
     train_done_head(agent, labels, rollout_start)
     agent.vlm.model.eval()
     run_eval(agent)
+    run_home_test(agent)
 
 
 if __name__ == "__main__":
