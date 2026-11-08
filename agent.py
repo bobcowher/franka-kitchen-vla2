@@ -6,6 +6,7 @@ import os
 if not os.environ.get("DISPLAY"):
     os.environ.setdefault("MUJOCO_GL", "egl")
 
+import numpy as np
 import torch
 import math
 import time
@@ -14,7 +15,7 @@ import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import HeldSetpointWrapper, VLAObservationWrapper, ObsReshapeWrapper 
+from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, VLAObservationWrapper, ObsReshapeWrapper
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -51,7 +52,9 @@ class Agent:
                  execute_steps=4,
                  warmup_steps=200,
                  min_lr_fraction=0.1,
-                 eval_rollouts=3):
+                 eval_rollouts=3,
+                 done_threshold=0.5,
+                 done_patience=2):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -62,6 +65,9 @@ class Agent:
         self.min_lr_fraction = min_lr_fraction
         self.eval_rollouts = eval_rollouts
         self.learning_rate = learning_rate
+        # Stop once done_prob reaches done_threshold on done_patience replans in a row.
+        self.done_threshold = done_threshold
+        self.done_patience = done_patience
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -188,6 +194,7 @@ class Agent:
         """Forget any queued actions; call at the start of every episode."""
         self.action_queue = []
         self.done_prob = 0.0
+        self.done_streak = 0
 
     def get_action(self, images, prompt, joint_pos):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
@@ -195,7 +202,31 @@ class Agent:
             chunks, done_prob = self.vlm.get_action_and_done(images, [prompt], joint_pos)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
             self.done_prob = done_prob.item()
+            self.done_streak = self.done_streak + 1 if self.done_prob >= self.done_threshold else 0
         return self.action_queue.pop(0)
+
+    def run_until_done(self, task, prompt, render_mode="human"):
+        """Act until the done rule fires, then go home. Returns (done fired, task complete at the end)."""
+        env = self._make_env(task, render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
+        env = ArmHomeWrapper(env)
+        obs, _ = env.reset()
+        self.reset_policy()
+        self.vlm.model.eval()
+
+        fired = False
+        for _ in range(self.max_episode_steps):
+            images, joint_pos, _ = self.process_observation(obs)
+            action = self.get_action(images, prompt, joint_pos)
+            if self.done_streak >= self.done_patience:
+                fired = True
+                env.return_to_home()
+                break
+            obs, _, _, _, _ = env.step(action)
+
+        _, reward, _, _, _ = env.step(np.zeros(env.action_space.shape[0]))
+        self.vlm.model.train()
+        env.close()
+        return fired, reward > 0
 
     def test(self, task, render_mode="rgb_array", delay=0, rollout=0, prompt=None):
         env = self._make_env(task, render_mode)
