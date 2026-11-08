@@ -188,18 +188,24 @@ class ArmHomeWrapper(Wrapper):
         self.tolerance = tolerance
         self.max_steps = max_steps
 
+    def home_action(self):
+        """The next action toward home, or None once the arm is there."""
+        env = self.unwrapped
+        error = self.home - env.data.qpos[:9]
+        if np.abs(error).max() < self.tolerance:
+            return None
+        # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
+        return np.clip(self.kp * error / env.robot_env.act_rng[:9], -1.0, 1.0)
+
     def return_to_home(self):
         """Step until the arm is home. Returns (observation, steps_taken)."""
         env = self.unwrapped
-        # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
-        act_rng = env.robot_env.act_rng[:9]
         observation = None
 
         for step in range(self.max_steps):
-            error = self.home - env.data.qpos[:9]
-            if np.abs(error).max() < self.tolerance:
+            action = self.home_action()
+            if action is None:
                 return observation, step
-            action = np.clip(self.kp * error / act_rng, -1.0, 1.0)
             observation, _, _, _, _ = self.env.step(action)
 
         print(f"return_to_home gave up after {self.max_steps} steps, "

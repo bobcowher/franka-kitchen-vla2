@@ -93,9 +93,9 @@ class Agent:
 
         self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], self.learning_rate)
 
-    def _make_env(self, task, render_mode):
+    def _make_env(self, task, render_mode, **kitchen_args):
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
-                       tasks_to_complete=[task], render_mode=render_mode)
+                       tasks_to_complete=[task], render_mode=render_mode, **kitchen_args)
         env = HeldSetpointWrapper(env)
         env = VLAObservationWrapper(env, image_size=self.native_image_size)
         return ObsReshapeWrapper(env, image_size=self.image_size)
@@ -187,12 +187,14 @@ class Agent:
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
         self.action_queue = []
+        self.done_prob = 0.0
 
     def get_action(self, images, prompt, joint_pos):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
-            chunk = self.vlm.get_action(images, [prompt], joint_pos)[0]  # (chunk, 9)
-            self.action_queue = list(chunk[:self.execute_steps].cpu().numpy())
+            chunks, done_prob = self.vlm.get_action_and_done(images, [prompt], joint_pos)
+            self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
+            self.done_prob = done_prob.item()
         return self.action_queue.pop(0)
 
     def test(self, task, render_mode="rgb_array", delay=0, rollout=0, prompt=None):

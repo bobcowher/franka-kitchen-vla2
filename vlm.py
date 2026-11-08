@@ -13,7 +13,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256):
 
         torch.manual_seed(123)
 
@@ -48,6 +48,9 @@ class VisionLanguageModel:
                                                     n_actions=num_actions * chunk_size)
         
         self.model.to(self.device)
+
+        # Sits beside self.model, not in it, so action training and checkpoints never see its weights.
+        self.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim).to(self.device)
 
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
 
@@ -88,6 +91,15 @@ class VisionLanguageModel:
         print(f"Successfully loaded weights from {checkpoint_path}")
 
 
+    def save_done_head(self, path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        torch.save(self.done_head.state_dict(), path)
+
+
+    def load_done_head(self, path):
+        self.done_head.load_state_dict(torch.load(path, map_location=self.device))
+
+
     def _add_joint_state(self, prompts, joint_pos):
         """Append joint positions as 0-99 integer bins: ~25 tokens, equal resolution per joint."""
         lo, hi = JOINT_MIN.to(joint_pos.device), JOINT_MAX.to(joint_pos.device)
@@ -104,7 +116,37 @@ class VisionLanguageModel:
         return action
 
 
+    @torch.no_grad
+    def get_action_and_done(self, images, prompts, joint_pos):
+        """Clamped action chunks and the done probability, from one forward pass."""
+        outputs = self._forward(images, prompts, joint_pos)
+        action = torch.clamp(self._action_logits(outputs, len(prompts)), -1, 1)
+        return action, torch.sigmoid(self._done_logits(outputs))
+
+
     def get_action_logits(self, images, prompts, joint_pos):
+        outputs = self._forward(images, prompts, joint_pos)
+        return self._action_logits(outputs, len(prompts))
+
+
+    def get_done_logits(self, images, prompts, joint_pos):
+        with torch.no_grad():
+            outputs = self._forward(images, prompts, joint_pos)
+        return self._done_logits(outputs)
+
+
+    def _action_logits(self, outputs, batch_size):
+        logits = outputs.logits[:, -1, :].float()
+        return logits.view(batch_size, self.chunk_size, self.num_actions)
+
+
+    def _done_logits(self, outputs):
+        # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
+        feature = outputs.hidden_states[-1][:, -1, :].detach()
+        return self.done_head(feature).squeeze(-1)
+
+
+    def _forward(self, images, prompts, joint_pos):
         prompts = self._add_joint_state(prompts, joint_pos)
 
         text_batch = []
@@ -133,16 +175,28 @@ class VisionLanguageModel:
 
         # Runs matmuls in bf16 so the fp32 and bf16 layers can mix; gradients still land on fp32 weights.
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            outputs = self.model(**inputs)
-        logits = outputs.logits[:, -1, :].float()
-
-        return logits.view(len(prompts), self.chunk_size, self.num_actions)
+            return self.model(**inputs, output_hidden_states=True)
 
 
 
 class FP32Linear(torch.nn.Linear):
     def forward(self, input):
         return super().forward(input.float())
+
+
+class DoneHead(nn.Module):
+
+    def __init__(self, input_dim, hidden_dim=256):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.output = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x.float()))
+        x = F.relu(self.fc2(x))
+        return self.output(x)
+
 
 class RobotControlOutputHead(nn.Module):
     
