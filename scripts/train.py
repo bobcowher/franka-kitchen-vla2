@@ -13,3 +13,10 @@ from agent import Agent
 agent = Agent(data_path="dataset", name="bc_network")
 
 agent.train(epochs=5000, batch_size=64)
+
+# The same stop eval as run 26, so the two compare directly.
+from train_done import EVAL_POST_STEPS, ROLLOUT_LIMIT, run_eval
+
+agent.vlm.model.eval()
+agent.max_episode_steps = ROLLOUT_LIMIT + EVAL_POST_STEPS + 300
+run_eval(agent)

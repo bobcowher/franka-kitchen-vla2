@@ -8,6 +8,7 @@ if not os.environ.get("DISPLAY"):
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import math
 import time
 import datetime
@@ -23,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 import frames
 from dataset import Dataset
 from vlm import VisionLanguageModel
-from tasks import eval_phrase, sample_phrases
+from tasks import TASK_DESCRIPTIONS, TASKS, eval_phrase, sample_phrases
 
 from config import SMOLVLM2_CONFIG_500M
 
@@ -54,7 +55,10 @@ class Agent:
                  min_lr_fraction=0.1,
                  eval_rollouts=3,
                  done_threshold=0.5,
-                 done_patience=2):
+                 done_patience=2,
+                 done_learning_rate=3e-4,
+                 done_batch_size=48,
+                 done_near_end_steps=16):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -68,6 +72,8 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        self.done_batch_size = done_batch_size
+        self.done_near_end_steps = done_near_end_steps
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -98,10 +104,12 @@ class Agent:
         self.reset_policy()
 
         self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], self.learning_rate)
+        self.done_optimizer = Adam(self.vlm.done_head.parameters(), done_learning_rate)
 
     def _make_env(self, task, render_mode, **kitchen_args):
+        tasks = task if isinstance(task, list) else [task]
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
-                       tasks_to_complete=[task], render_mode=render_mode, **kitchen_args)
+                       tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
         env = HeldSetpointWrapper(env)
         env = VLAObservationWrapper(env, image_size=self.native_image_size)
         return ObsReshapeWrapper(env, image_size=self.image_size)
@@ -136,6 +144,8 @@ class Agent:
             progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
             return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
         trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
+        done_pools = self._done_pools()
+        print({name: len(pool) for name, pool in done_pools.items()}, flush=True)
 
         for epoch in range(epochs):
             lr = self.learning_rate * lr_factor(epoch)
@@ -164,8 +174,13 @@ class Agent:
             grad_norm = torch.nn.utils.get_total_norm([p.grad for p in trainable])
 
             self.optimizer.step()
-            
+
+            done_loss, done_probs = self._train_done_step(done_pools)
+
             if(epoch % 10 == 0):
+                summary_writer.add_scalar("done/loss", done_loss, epoch)
+                for name, prob in done_probs.items():
+                    summary_writer.add_scalar(f"done/prob_{name}", prob, epoch)
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
@@ -173,7 +188,7 @@ class Agent:
                 summary_writer.add_scalar("train/lr", lr, epoch)
 
             if(epoch % 100 == 0):
-                print(f"Epoch: {epoch} Loss: {loss.item()}")
+                print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f} Done probs: {done_probs}", flush=True)
                 self.vlm.save_the_model()
 
             if(epoch and epoch % 1000 == 0):
@@ -182,9 +197,51 @@ class Agent:
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer)
 
+    def _done_pools(self):
+        """Dataset rows for each group of a done batch. Each demo's last row is its moment of success."""
+        data = self.dataset
+        rows = np.arange(data.mem_ctr)
+        is_done = data.terminal_memory[rows]
+        near_end = data.episode_end_memory[rows] - rows <= self.done_near_end_steps
+        return {"done": rows[is_done], "wrong_prompt": rows[is_done],
+                "demo": rows[~is_done], "near_end": rows[near_end & ~is_done]}
+
+    def _train_done_step(self, pools):
+        """One update of the done head alone: half done frames, and an equal third of the rest from each negative group."""
+        data = self.dataset
+        negatives = self.done_batch_size // 6
+        sizes = {name: negatives for name in pools}
+        sizes["done"] = self.done_batch_size - 3 * negatives
+
+        batch, prompts, targets, groups = [], [], [], []
+        for name, pool in pools.items():
+            picked = np.random.choice(pool, sizes[name])
+            descriptions = list(data.task_description_memory[picked])
+            if name == "wrong_prompt":
+                # A phrase from some other task: same frame, but this instruction hasn't been done.
+                descriptions = [np.random.choice([d for d in TASK_DESCRIPTIONS if d != own]) for own in descriptions]
+            prompts += sample_phrases(descriptions)
+            targets += [float(name == "done")] * sizes[name]
+            groups += [name] * sizes[name]
+            batch.append(picked)
+        batch = np.concatenate(batch)
+
+        logits = self.vlm.get_done_logits(list(data.camera_scene_memory[batch]), prompts,
+                                          torch.tensor(data.joint_pos_memory[batch], device=self.device))
+        loss = F.binary_cross_entropy_with_logits(logits, torch.tensor(targets, device=self.device))
+
+        self.done_optimizer.zero_grad()
+        loss.backward()
+        self.done_optimizer.step()
+
+        probs = torch.sigmoid(logits).detach().cpu().numpy()
+        means = {name: round(float(probs[np.array(groups) == name].mean()), 3) for name in pools}
+        return loss.item(), means
+
     def eval(self, epoch, summary_writer):
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
+        self.vlm.save_done_head(f"checkpoints/done_head-step{epoch}.pth")
         for task in EVAL_TASKS:
             rate = sum(self.test(task, rollout=i) for i in range(self.eval_rollouts)) / self.eval_rollouts
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
@@ -205,13 +262,24 @@ class Agent:
             self.done_streak = self.done_streak + 1 if self.done_prob >= self.done_threshold else 0
         return self.action_queue.pop(0)
 
-    def run_until_done(self, task, prompt, render_mode="human"):
-        """Act until the done rule fires, then go home. Returns (done fired, task complete at the end)."""
-        env = self._make_env(task, render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
-        env = ArmHomeWrapper(env)
-        obs, _ = env.reset()
+    def make_session_env(self, render_mode="human"):
+        """An env for many commands in a row: it never ends on success and tracks every task."""
+        env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
+        return ArmHomeWrapper(env)
+
+    def run_command(self, env, obs, prompt, slowdown=1.0):
+        """Act until the done rule fires or time runs out, then go home. Returns (obs, done fired, completed tasks)."""
         self.reset_policy()
         self.vlm.model.eval()
+        last_step = time.time()
+
+        def step(action):
+            nonlocal obs, last_step
+            obs, _, _, _, step_info = env.step(action)
+            # Sleep for (slowdown - 1) times what the step took, so slowdown=2 runs at half speed.
+            time.sleep((slowdown - 1) * (time.time() - last_step))
+            last_step = time.time()
+            return step_info
 
         fired = False
         for _ in range(self.max_episode_steps):
@@ -219,14 +287,18 @@ class Agent:
             action = self.get_action(images, prompt, joint_pos)
             if self.done_streak >= self.done_patience:
                 fired = True
-                env.return_to_home()
                 break
-            obs, _, _, _, _ = env.step(action)
+            step(action)
 
-        _, reward, _, _, _ = env.step(np.zeros(env.action_space.shape[0]))
+        for _ in range(env.max_steps):
+            action = env.home_action()
+            if action is None:
+                break
+            step(action)
+
+        info = step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
-        env.close()
-        return fired, reward > 0
+        return obs, fired, info["step_task_completions"]
 
     def test(self, task, render_mode="rgb_array", delay=0, rollout=0, prompt=None):
         env = self._make_env(task, render_mode)
