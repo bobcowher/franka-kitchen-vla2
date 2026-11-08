@@ -7,7 +7,6 @@ if not os.environ.get("DISPLAY"):
     os.environ.setdefault("MUJOCO_GL", "egl")
 
 import torch
-import torch.nn.functional as F
 import math
 import time
 import datetime
@@ -37,19 +36,8 @@ def git_label():
     return f"{git('branch', '--show-current') or 'detached'}_{git('rev-parse', '--short', 'HEAD') or 'nogit'}"
 
 
-# Per-joint min/max over the dataset; fingers (last two) span only 0-0.049 m, so each joint is binned to its own range.
-JOINT_MIN = torch.tensor([-2.9014, -1.7744, -2.3526, -3.0786, -0.7136, -0.0261, -0.0030, -0.0026, -0.0027])
-JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493,  2.5794,  0.0489,  0.0428])
-
-
-def with_joint_state(prompts, joint_pos):
-    """Append joint positions as 0-99 integer bins: ~25 tokens, equal resolution per joint."""
-    lo, hi = JOINT_MIN.to(joint_pos.device), JOINT_MAX.to(joint_pos.device)
-    bins = ((joint_pos - lo) / (hi - lo) * 99).round().clamp(0, 99).int().tolist()
-    return [f"{p}. Joints: {' '.join(map(str, b))}" for p, b in zip(prompts, bins)]
-
+# Chunks near a demo's end run past it; mask zeroes those steps so the arm isn't taught to keep moving after the demo stops.
 def masked_mse(pred, target, mask):
-    """MSE over the chunk steps that exist; mask is 0 for steps past the end of the episode."""
     per_step = ((pred - target) ** 2).mean(dim=-1)
     return (per_step * mask).sum() / mask.sum()
 
@@ -63,7 +51,6 @@ class Agent:
                  execute_steps=4,
                  warmup_steps=200,
                  min_lr_fraction=0.1,
-                 grad_clip=10.0,
                  eval_rollouts=3):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
@@ -73,7 +60,6 @@ class Agent:
         # Linear warmup over warmup_steps, then cosine decay to min_lr_fraction of the peak LR by the last epoch.
         self.warmup_steps = warmup_steps
         self.min_lr_fraction = min_lr_fraction
-        self.grad_clip = grad_clip  # SmolVLA's value
         self.eval_rollouts = eval_rollouts
         self.learning_rate = learning_rate
 
@@ -143,10 +129,13 @@ class Agent:
                 return (epoch + 1) / self.warmup_steps
             progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
             return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
-        scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_factor)
         trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
 
         for epoch in range(epochs):
+            lr = self.learning_rate * lr_factor(epoch)
+            for group in self.optimizer.param_groups:
+                group["lr"] = lr
+
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
            
             images, joint_pos, joint_vel = self.process_observation(states)
@@ -155,7 +144,8 @@ class Agent:
             action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
 
             pred_actions = self.vlm.get_action_logits(images=images,
-                                                      prompts=with_joint_state(sample_phrases(tasks), joint_pos))
+                                                      prompts=sample_phrases(tasks),
+                                                      joint_pos=joint_pos)
     
             arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
             gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
@@ -165,17 +155,16 @@ class Agent:
             self.optimizer.zero_grad()
 
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, self.grad_clip)
+            grad_norm = torch.nn.utils.get_total_norm([p.grad for p in trainable])
 
             self.optimizer.step()
-            scheduler.step()
             
             if(epoch % 10 == 0):
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
                 summary_writer.add_scalar("train/grad_norm", grad_norm, epoch)
-                summary_writer.add_scalar("train/lr", scheduler.get_last_lr()[0], epoch)
+                summary_writer.add_scalar("train/lr", lr, epoch)
 
             if(epoch % 100 == 0):
                 print(f"Epoch: {epoch} Loss: {loss.item()}")
@@ -199,10 +188,10 @@ class Agent:
         """Forget any queued actions; call at the start of every episode."""
         self.action_queue = []
 
-    def act(self, images, prompt, joint_pos):
+    def get_action(self, images, prompt, joint_pos):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
-            chunk = self.vlm.get_action(images, with_joint_state([prompt], joint_pos))[0]  # (chunk, 9)
+            chunk = self.vlm.get_action(images, [prompt], joint_pos)[0]  # (chunk, 9)
             self.action_queue = list(chunk[:self.execute_steps].cpu().numpy())
         return self.action_queue.pop(0)
 
@@ -217,7 +206,7 @@ class Agent:
         self.vlm.model.eval()
         while not (done or trunc):
             images, joint_pos, _ = self.process_observation(obs)
-            action = self.act(images, prompt, joint_pos)
+            action = self.get_action(images, prompt, joint_pos)
             obs, reward, done, trunc, _ = env.step(action)
             total_reward += reward
             time.sleep(delay)

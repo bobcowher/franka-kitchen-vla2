@@ -23,15 +23,16 @@ ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
 # like process_observation hands out. Prompt lengths differ so padding is
 # actually exercised.
 states, _, _, tasks = agent.dataset.sample_batch(2)
-images, _, _ = agent.process_observation(states)
+images, joint_pos, _ = agent.process_observation(states)
 
 size = agent.image_size
 green = Image.new("RGB", (size, size), "white")
 ImageDraw.Draw(green).rectangle([size // 4, size // 4, 3 * size // 4, 3 * size // 4], fill="green")
 images += [np.array(image.resize((size, size))), np.array(green)]
 tasks  += ["What color is the square in this image?", "Square?"]
+joint_pos = torch.cat([joint_pos, torch.zeros(2, 9, device=joint_pos.device)])
 
-batched = vlm.get_action(images, tasks)
+batched = vlm.get_action(images, tasks, joint_pos)
 print(batched)
 
 # 1. One chunk of chunk_size x 9 actions per sample.
@@ -45,7 +46,7 @@ assert batched.min() >= -1 and batched.max() <= 1, "get_action output escaped [-
 #    padding, or reading the wrong position, shows up here as a large diff on
 #    the shorter prompts. bf16 noise alone stays well under the tolerance.
 for i, (img, task) in enumerate(zip(images, tasks)):
-    alone = vlm.get_action([img], [task])
+    alone = vlm.get_action([img], [task], joint_pos[i:i + 1])
     diff = (alone[0].float() - batched[i].float()).abs().max().item()
     print(f"sample {i}: max |alone - batched| = {diff:.4f}  ({task!r})")
     assert diff < 0.05, f"sample {i} changes when batched"
