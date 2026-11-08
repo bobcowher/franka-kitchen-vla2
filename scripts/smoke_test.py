@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
-from agent import Agent, CHUNK_SIZE
+from agent import Agent
 
 agent = Agent(data_path="dataset", name="bc_network")
 vlm = agent.vlm
@@ -34,8 +34,8 @@ tasks  += ["What color is the square in this image?", "Square?"]
 batched = vlm.get_action(images, tasks)
 print(batched)
 
-# 1. One chunk of CHUNK_SIZE x 9 actions per sample.
-expected = (len(images), CHUNK_SIZE, 9)
+# 1. One chunk of chunk_size x 9 actions per sample.
+expected = (len(images), agent.chunk_size, 9)
 assert batched.shape == expected, f"expected {expected}, got {tuple(batched.shape)}"
 
 # 2. Clamped into the normalized action range.

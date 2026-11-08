@@ -27,18 +27,7 @@ from tasks import eval_phrase, sample_phrases
 
 from config import SMOLVLM2_CONFIG_500M
 
-# 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
-GRIPPER_WEIGHT = 0.125
-WARMUP_STEPS = 200
-MIN_LR_FRACTION = 0.1
-GRAD_CLIP = 10.0  # SmolVLA's value
-
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-EVAL_ROLLOUTS = 3
-
-# Action chunking, as in ACT and diffusion policy: predict the next CHUNK_SIZE actions, run the first EXECUTE_STEPS, then look again.
-CHUNK_SIZE = 8
-EXECUTE_STEPS = 4
 
 
 def git_label():
@@ -67,12 +56,31 @@ def masked_mse(pred, target, mask):
 
 class Agent:
 
-    def __init__(self, eval=False, data_path="dataset", name='bc_network'):
+    def __init__(self, eval=False, data_path="dataset", name='bc_network',
+                 learning_rate=0.0001,
+                 gripper_weight=0.125,
+                 chunk_size=8,
+                 execute_steps=4,
+                 warmup_steps=200,
+                 min_lr_fraction=0.1,
+                 grad_clip=10.0,
+                 eval_rollouts=3):
+        # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
+        self.gripper_weight = gripper_weight
+        # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
+        self.chunk_size = chunk_size
+        self.execute_steps = execute_steps
+        # Linear warmup over warmup_steps, then cosine decay to min_lr_fraction of the peak LR by the last epoch.
+        self.warmup_steps = warmup_steps
+        self.min_lr_fraction = min_lr_fraction
+        self.grad_clip = grad_clip  # SmolVLA's value
+        self.eval_rollouts = eval_rollouts
+        self.learning_rate = learning_rate
+
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
         self.native_image_size = 896
         max_buffer_size = 100000
-        learning_rate = 0.0001
 
         env = self._make_env(EVAL_TASKS[0], render_mode='rgb_array')
         obs, _ = env.reset()
@@ -94,10 +102,10 @@ class Agent:
         
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
                                        num_actions=num_actions,
-                                       chunk_size=CHUNK_SIZE)
+                                       chunk_size=self.chunk_size)
         self.reset_policy()
 
-        self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], learning_rate)
+        self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], self.learning_rate)
 
     def _make_env(self, task, render_mode):
         env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
@@ -130,17 +138,16 @@ class Agent:
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
-        # Linear warmup, then cosine decay to 10% of the peak LR by the last epoch.
         def lr_factor(epoch):
-            if epoch < WARMUP_STEPS:
-                return (epoch + 1) / WARMUP_STEPS
-            progress = (epoch - WARMUP_STEPS) / max(1, epochs - WARMUP_STEPS)
-            return MIN_LR_FRACTION + (1 - MIN_LR_FRACTION) * 0.5 * (1 + math.cos(math.pi * progress))
+            if epoch < self.warmup_steps:
+                return (epoch + 1) / self.warmup_steps
+            progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
+            return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
         scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_factor)
         trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
 
         for epoch in range(epochs):
-            states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, CHUNK_SIZE)
+            states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
            
             images, joint_pos, joint_vel = self.process_observation(states)
 
@@ -153,12 +160,12 @@ class Agent:
             arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
             gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
 
-            loss = arm_loss + GRIPPER_WEIGHT * gripper_loss
+            loss = arm_loss + self.gripper_weight * gripper_loss
 
             self.optimizer.zero_grad()
 
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, GRAD_CLIP)
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, self.grad_clip)
 
             self.optimizer.step()
             scheduler.step()
@@ -184,7 +191,7 @@ class Agent:
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         for task in EVAL_TASKS:
-            rate = sum(self.test(task, rollout=i) for i in range(EVAL_ROLLOUTS)) / EVAL_ROLLOUTS
+            rate = sum(self.test(task, rollout=i) for i in range(self.eval_rollouts)) / self.eval_rollouts
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
             print(f"  eval {task}: {rate:.0%}")
 
@@ -193,10 +200,10 @@ class Agent:
         self.action_queue = []
 
     def act(self, images, prompt, joint_pos):
-        """Next action for one env. The model only runs when the queue is empty, i.e. every EXECUTE_STEPS steps."""
+        """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
             chunk = self.vlm.get_action(images, with_joint_state([prompt], joint_pos))[0]  # (chunk, 9)
-            self.action_queue = list(chunk[:EXECUTE_STEPS].cpu().numpy())
+            self.action_queue = list(chunk[:self.execute_steps].cpu().numpy())
         return self.action_queue.pop(0)
 
     def test(self, task, render_mode="rgb_array", delay=0, rollout=0):
