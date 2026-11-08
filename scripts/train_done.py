@@ -31,7 +31,7 @@ BATCH_SIZE = 8 if SMOKE else 64
 LEARNING_RATE = 3e-4
 NEAR_END_STEPS = 16
 EVAL_ROLLOUTS = 1 if SMOKE else 20  # per task, per prompt set
-ROLLOUT_LIMIT = 40 if SMOKE else 400
+ROLLOUT_LIMIT = 400
 OVERRUN_STEPS = 20  # collection only: policy keeps acting after success
 HOLD_STEPS = 15
 EVAL_POST_STEPS = 60  # eval: how long after success the policy keeps running, giving done time to fire
@@ -268,7 +268,7 @@ def check_feature_matches_action_input(agent):
     """The done feature should be exactly what the action head reads."""
     image = [agent.dataset.camera_scene_memory[0]]
     joint_pos = torch.tensor(agent.dataset.joint_pos_memory[:1], device=agent.device)
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         outputs = agent.vlm._forward(image, ["Open the microwave door"], joint_pos)
         feature = outputs.hidden_states[-1][:, -1, :]
         difference = (agent.vlm.model.lm_head(feature).float() - outputs.logits[:, -1, :].float()).abs().max().item()
