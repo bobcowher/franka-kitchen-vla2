@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -10,7 +11,8 @@ from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
 from agent import Agent
 
-agent = Agent(data_path="dataset", name="bc_network")
+# DATA_PATH lets a queued run choose its data without changing the project's data folder.
+agent = Agent(data_path=os.environ.get("DATA_PATH", "dataset"), name="bc_network")
 
 agent.train(epochs=5000, batch_size=64)
 

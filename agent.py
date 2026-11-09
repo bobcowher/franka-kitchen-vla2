@@ -92,7 +92,9 @@ class Agent:
                                n_joints=9)
 
         if not eval:
-            self.dataset.load_data(path=data_path)
+            # Several folders can be given, separated by colons.
+            for path in data_path.split(":"):
+                self.dataset.load_data(path=path)
 
         num_actions = env.action_space.shape[0]
 

@@ -78,14 +78,14 @@ class Dataset():
         steps_per_file = [len(_open(filename)['action']) for filename in files]
         total = sum(steps_per_file)
 
-        if total > self.mem_size:
+        if self.mem_ctr + total > self.mem_size:
             raise ValueError(
                 f"{path} holds {total} steps across {len(files)} shards, but this "
-                f"Dataset was built for {self.mem_size}. Raise max_size to at least "
-                f"{total} ({total * self.camera_scene_memory[0].nbytes / 1e9:.1f} GB "
+                f"Dataset was built for {self.mem_size} and has {self.mem_ctr} already. Raise max_size to at least "
+                f"{self.mem_ctr + total} ({(self.mem_ctr + total) * self.camera_scene_memory[0].nbytes / 1e9:.1f} GB "
                 f"of frames) or point at a smaller directory.")
 
-        index = 0
+        index = self.mem_ctr
         # pool.map keeps input order, which is what lines results up with the counts.
         with ThreadPoolExecutor(WORKERS) as pool:
             loaded = pool.map(self._read, files)
@@ -116,11 +116,11 @@ class Dataset():
                     self.finished_memory[row] = finished
                 index = end
 
-        self.mem_ctr = total
+        self.mem_ctr += total
 
         elapsed = time.time() - start
 
-        print(f"Loaded {self.mem_ctr} steps from {path} in {elapsed:.1f}s")
+        print(f"Loaded {total} steps from {path} in {elapsed:.1f}s, {self.mem_ctr} in all")
 
     def _read(self, filename):
         """Decompress one shard and reduce its frames, on a worker thread.
