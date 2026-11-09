@@ -198,11 +198,11 @@ class Agent:
         self.eval(epochs, summary_writer)
 
     def _done_pools(self):
-        """Dataset rows for each group of a done batch. Each demo's last row is its moment of success."""
+        """Dataset rows for each group of a done batch. Near-end frames are the ones just before a demo's first done frame."""
         data = self.dataset
         rows = np.arange(data.mem_ctr)
         is_done = data.terminal_memory[rows]
-        near_end = data.episode_end_memory[rows] - rows <= self.done_near_end_steps
+        near_end = data.done_start_memory[rows] - rows < self.done_near_end_steps
         return {"done": rows[is_done], "wrong_prompt": rows[is_done],
                 "demo": rows[~is_done], "near_end": rows[near_end & ~is_done]}
 
@@ -218,8 +218,9 @@ class Agent:
             picked = np.random.choice(pool, sizes[name])
             descriptions = list(data.task_description_memory[picked])
             if name == "wrong_prompt":
-                # A phrase from some other task: same frame, but this instruction hasn't been done.
-                descriptions = [np.random.choice([d for d in TASK_DESCRIPTIONS if d != own]) for own in descriptions]
+                # A phrase from some other task that hasn't been done in this scene.
+                descriptions = [np.random.choice([d for d in TASK_DESCRIPTIONS if d != own and d not in data.finished_memory[row]])
+                                for own, row in zip(descriptions, picked)]
             prompts += sample_phrases(descriptions)
             targets += [float(name == "done")] * sizes[name]
             groups += [name] * sizes[name]

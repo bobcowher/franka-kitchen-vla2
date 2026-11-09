@@ -5,7 +5,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import glob
 import frames
-from tasks import task_index
+from tasks import TASKS, task_index
 
 # Inflate and resize both release the GIL, so threads scale here where they
 # normally would not. Measured 8x on 32 cores, flat past 16.
@@ -50,6 +50,12 @@ class Dataset():
         self.task_id_memory = np.zeros(self.mem_size, dtype=np.int64)
         # Row index one past the last step of each step's episode; action chunks must not cross it.
         self.episode_end_memory = np.zeros(self.mem_size, dtype=np.int64)
+        # Row of the episode's first done frame.
+        self.done_start_memory = np.zeros(self.mem_size, dtype=np.int64)
+        # False for done and fumble frames in version 2 shards, which stay out of the action loss.
+        self.action_ok_memory = np.ones(self.mem_size, dtype=bool)
+        # Descriptions of the tasks already finished when the episode started.
+        self.finished_memory = np.empty(self.mem_size, dtype=object)
 
     def __len__(self):
         return self.mem_ctr
@@ -100,6 +106,14 @@ class Dataset():
                 self.task_description_memory[index:end] = description
                 self.task_id_memory[index:end] = task_index(description)[0]
                 self.episode_end_memory[index:end] = end  # each shard is one episode
+                done = data['done'].astype(bool)
+                self.done_start_memory[index:end] = index + done.argmax()
+                finished = ()
+                if 'schema_version' in data:
+                    self.action_ok_memory[index:end] = ~(done | data['exclude_action'].astype(bool))
+                    finished = tuple(TASKS[str(name).replace('_', ' ')] for name in data['finished_tasks'])
+                for row in range(index, end):
+                    self.finished_memory[row] = finished
                 index = end
 
         self.mem_ctr = total
@@ -124,12 +138,13 @@ class Dataset():
         return camera, data
 
     def sample_batch(self, batch_size, chunk_size=1):
-        """Random steps, each with the chunk_size actions starting there. action_mask is False where a chunk runs past its episode."""
-        batch = np.random.choice(self.mem_ctr, batch_size)
+        """Random usable steps, each with the chunk_size actions starting there. action_mask is False where a chunk runs past its episode or into frames kept out of the action loss."""
+        batch = np.random.choice(np.flatnonzero(self.action_ok_memory[:self.mem_ctr]), batch_size)
         episode_end = self.episode_end_memory[batch][:, None]
         steps = batch[:, None] + np.arange(chunk_size)  # (batch, chunk) rows of the actions to predict
         action_mask = steps < episode_end
         steps = np.minimum(steps, episode_end - 1)  # masked steps still need a valid row to read
+        action_mask &= self.action_ok_memory[steps]
 
         state = {
             # NHWC uint8, which is what the VLM processor takes as-is.
