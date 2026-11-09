@@ -151,6 +151,7 @@ class Dataset():
             "camera_scene": self.camera_scene_memory[batch],
             "joint_pos": self.joint_pos_memory[batch],
             "joint_vel": self.joint_vel_memory[batch],
+            "row": batch,
         }
 
         return (state,

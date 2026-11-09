@@ -129,6 +129,12 @@ class VisionLanguageModel:
         return self._action_logits(outputs, len(prompts))
 
 
+    def get_action_and_done_logits(self, images, prompts, joint_pos):
+        """Action chunks and done logits for training, from one forward pass."""
+        outputs = self._forward(images, prompts, joint_pos)
+        return self._action_logits(outputs, len(prompts)), self._done_logits(outputs)
+
+
     def get_done_logits(self, images, prompts, joint_pos):
         with torch.no_grad():
             outputs = self._forward(images, prompts, joint_pos)

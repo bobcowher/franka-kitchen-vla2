@@ -57,7 +57,8 @@ class Agent:
                  done_threshold=0.5,
                  done_patience=2,
                  done_learning_rate=3e-4,
-                 done_batch_size=48,
+                 done_extra_rows=12,
+                 wrong_prompt_rows=4,
                  done_near_end_steps=16):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
@@ -72,7 +73,9 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
-        self.done_batch_size = done_batch_size
+        # Rows added to each batch for the done head alone; the action loss never sees them.
+        self.done_extra_rows = done_extra_rows
+        self.wrong_prompt_rows = wrong_prompt_rows
         self.done_near_end_steps = done_near_end_steps
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
@@ -144,8 +147,8 @@ class Agent:
             progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
             return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
         trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
-        done_pools = self._done_pools()
-        print({name: len(pool) for name, pool in done_pools.items()}, flush=True)
+        done_rows = np.flatnonzero(self.dataset.terminal_memory[:self.dataset.mem_ctr])
+        print(f"{len(done_rows)} done frames of {self.dataset.mem_ctr}", flush=True)
 
         for epoch in range(epochs):
             lr = self.learning_rate * lr_factor(epoch)
@@ -159,23 +162,31 @@ class Agent:
             actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
             action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
 
-            pred_actions = self.vlm.get_action_logits(images=images,
-                                                      prompts=sample_phrases(tasks),
-                                                      joint_pos=joint_pos)
-    
+            extra_rows, extra_prompts = self._extra_done_rows(done_rows)
+            extra_joints = torch.tensor(self.dataset.joint_pos_memory[extra_rows], device=self.device)
+
+            pred_actions, done_logits = self.vlm.get_action_and_done_logits(
+                images=images + list(self.dataset.camera_scene_memory[extra_rows]),
+                prompts=sample_phrases(tasks) + extra_prompts,
+                joint_pos=torch.cat([joint_pos, extra_joints]))
+            pred_actions = pred_actions[:batch_size]
+
             arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
             gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
 
             loss = arm_loss + self.gripper_weight * gripper_loss
+            done_loss, done_probs = self._done_loss(done_logits, states["row"])
 
             self.optimizer.zero_grad()
+            self.done_optimizer.zero_grad()
 
-            loss.backward()
+            # The done head reads detached features, so its loss only reaches its own weights.
+            (loss + done_loss).backward()
             grad_norm = torch.nn.utils.get_total_norm([p.grad for p in trainable])
 
             self.optimizer.step()
-
-            done_loss, done_probs = self._train_done_step(done_pools)
+            self.done_optimizer.step()
+            done_loss = done_loss.item()
 
             if(epoch % 10 == 0):
                 summary_writer.add_scalar("done/loss", done_loss, epoch)
@@ -197,47 +208,32 @@ class Agent:
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer)
 
-    def _done_pools(self):
-        """Dataset rows for each group of a done batch. Near-end frames are the ones just before a demo's first done frame."""
+    def _extra_done_rows(self, done_rows):
+        """Rows for the done head alone: done frames with their own task, then with a task not done in that scene."""
         data = self.dataset
-        rows = np.arange(data.mem_ctr)
-        is_done = data.terminal_memory[rows]
-        near_end = data.done_start_memory[rows] - rows < self.done_near_end_steps
-        return {"done": rows[is_done], "wrong_prompt": rows[is_done],
-                "demo": rows[~is_done], "near_end": rows[near_end & ~is_done]}
+        own = np.random.choice(done_rows, self.done_extra_rows)
+        wrong = np.random.choice(done_rows, self.wrong_prompt_rows)
+        wrong_tasks = [np.random.choice([d for d in TASK_DESCRIPTIONS
+                                         if d != data.task_description_memory[row] and d not in data.finished_memory[row]])
+                       for row in wrong]
+        return np.concatenate([own, wrong]), sample_phrases(list(data.task_description_memory[own]) + wrong_tasks)
 
-    def _train_done_step(self, pools):
-        """One update of the done head alone: half done frames, and an equal third of the rest from each negative group."""
+    def _done_loss(self, logits, batch_rows):
+        """BCE over the whole batch, with done frames weighted to count as much as all the others together."""
         data = self.dataset
-        negatives = self.done_batch_size // 6
-        sizes = {name: negatives for name in pools}
-        sizes["done"] = self.done_batch_size - 3 * negatives
+        batch_done = data.terminal_memory[batch_rows]
+        near_end = (data.done_start_memory[batch_rows] - batch_rows < self.done_near_end_steps) & ~batch_done
+        groups = np.array(["demo"] * len(batch_rows) + ["done"] * self.done_extra_rows + ["wrong_prompt"] * self.wrong_prompt_rows, dtype=object)
+        groups[:len(batch_rows)][near_end] = "near_end"
+        groups[:len(batch_rows)][batch_done] = "done"
 
-        batch, prompts, targets, groups = [], [], [], []
-        for name, pool in pools.items():
-            picked = np.random.choice(pool, sizes[name])
-            descriptions = list(data.task_description_memory[picked])
-            if name == "wrong_prompt":
-                # A phrase from some other task that hasn't been done in this scene.
-                descriptions = [np.random.choice([d for d in TASK_DESCRIPTIONS if d != own and d not in data.finished_memory[row]])
-                                for own, row in zip(descriptions, picked)]
-            prompts += sample_phrases(descriptions)
-            targets += [float(name == "done")] * sizes[name]
-            groups += [name] * sizes[name]
-            batch.append(picked)
-        batch = np.concatenate(batch)
+        targets = torch.tensor(groups == "done", dtype=logits.dtype, device=logits.device)
+        positives = targets.sum()
+        loss = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives)
 
-        logits = self.vlm.get_done_logits(list(data.camera_scene_memory[batch]), prompts,
-                                          torch.tensor(data.joint_pos_memory[batch], device=self.device))
-        loss = F.binary_cross_entropy_with_logits(logits, torch.tensor(targets, device=self.device))
-
-        self.done_optimizer.zero_grad()
-        loss.backward()
-        self.done_optimizer.step()
-
-        probs = torch.sigmoid(logits).detach().cpu().numpy()
-        means = {name: round(float(probs[np.array(groups) == name].mean()), 3) for name in pools}
-        return loss.item(), means
+        probs = torch.sigmoid(logits.float()).detach().cpu().numpy()
+        means = {name: round(float(probs[groups == name].mean()), 3) for name in sorted(set(groups))}
+        return loss, means
 
     def eval(self, epoch, summary_writer):
         # Kept per eval so a good point in training can't be overwritten by later saves.
