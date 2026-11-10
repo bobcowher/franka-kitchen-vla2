@@ -240,7 +240,6 @@ class Agent:
     def eval(self, epoch, summary_writer):
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
-        self.vlm.save_done_head(f"checkpoints/done_head-step{epoch}.pth")
         for task in EVAL_TASKS:
             rate = sum(self.test(task, rollout=i) for i in range(self.eval_rollouts)) / self.eval_rollouts
             summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)

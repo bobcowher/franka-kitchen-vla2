@@ -49,7 +49,7 @@ class VisionLanguageModel:
         
         self.model.to(self.device)
 
-        # Sits beside self.model, not in it, so action training and checkpoints never see its weights.
+        # Sits beside self.model, not in it, so the action optimizer never sees its weights.
         self.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim).to(self.device)
 
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
@@ -67,7 +67,8 @@ class VisionLanguageModel:
                      if param.requires_grad}
 
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
-        torch.save({"revision": self.config["revision"], "trainable": trainable}, checkpoint_path)
+        torch.save({"revision": self.config["revision"], "trainable": trainable,
+                    "done_head": self.done_head.state_dict()}, checkpoint_path)
         print(f"Saved model checkpoint at {checkpoint_path}")
 
 
@@ -88,16 +89,11 @@ class VisionLanguageModel:
             raise ValueError(
                 f"{checkpoint_path} has parameters this model does not: "
                 f"{result.unexpected_keys}")
+        if "done_head" in checkpoint:
+            self.done_head.load_state_dict(checkpoint["done_head"])
+        else:
+            print(f"{checkpoint_path} has no done head; the stop rule will read an untrained one")
         print(f"Successfully loaded weights from {checkpoint_path}")
-
-
-    def save_done_head(self, path):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        torch.save(self.done_head.state_dict(), path)
-
-
-    def load_done_head(self, path):
-        self.done_head.load_state_dict(torch.load(path, map_location=self.device))
 
 
     def _add_joint_state(self, prompts, joint_pos):
