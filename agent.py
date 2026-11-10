@@ -111,9 +111,9 @@ class Agent:
         self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], self.learning_rate)
         self.done_optimizer = Adam(self.vlm.done_head.parameters(), done_learning_rate)
 
-    def _make_env(self, task, render_mode, **kitchen_args):
+    def _make_env(self, task, render_mode, max_episode_steps=None, **kitchen_args):
         tasks = task if isinstance(task, list) else [task]
-        env = gym.make("FrankaKitchen-v1", max_episode_steps=self.max_episode_steps,
+        env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps or self.max_episode_steps,
                        tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
         env = HeldSetpointWrapper(env)
         env = VLAObservationWrapper(env, image_size=self.native_image_size)
