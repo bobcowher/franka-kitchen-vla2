@@ -92,9 +92,7 @@ class Agent:
                                n_joints=9)
 
         if not eval:
-            # Several folders can be given, separated by colons.
-            for path in data_path.split(":"):
-                self.dataset.load_data(path=path)
+            self.dataset.load_data(path=data_path)
 
         num_actions = env.action_space.shape[0]
 
@@ -108,8 +106,10 @@ class Agent:
                                        chunk_size=self.chunk_size)
         self.reset_policy()
 
-        self.optimizer = Adam([p for p in self.vlm.model.parameters() if p.requires_grad], self.learning_rate)
-        self.done_optimizer = Adam(self.vlm.done_head.parameters(), done_learning_rate)
+        # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
+        self.optimizer = Adam([{"params": [p for p in self.vlm.model.parameters() if p.requires_grad]},
+                               {"params": self.vlm.done_head.parameters(), "lr": done_learning_rate}],
+                              self.learning_rate)
 
     def _make_env(self, task, render_mode, max_episode_steps=None, **kitchen_args):
         tasks = task if isinstance(task, list) else [task]
@@ -148,14 +148,13 @@ class Agent:
                 return (epoch + 1) / self.warmup_steps
             progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
             return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
-        trainable = [p for g in self.optimizer.param_groups for p in g["params"]]
+        policy_params = self.optimizer.param_groups[0]["params"]
         done_rows = np.flatnonzero(self.dataset.terminal_memory[:self.dataset.mem_ctr])
         print(f"{len(done_rows)} done frames of {self.dataset.mem_ctr}", flush=True)
 
         for epoch in range(epochs):
             lr = self.learning_rate * lr_factor(epoch)
-            for group in self.optimizer.param_groups:
-                group["lr"] = lr
+            self.optimizer.param_groups[0]["lr"] = lr
 
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
            
@@ -180,14 +179,12 @@ class Agent:
             done_loss, done_probs = self._done_loss(done_logits, states["row"])
 
             self.optimizer.zero_grad()
-            self.done_optimizer.zero_grad()
 
             # The done head reads detached features, so its loss only reaches its own weights.
             (loss + done_loss).backward()
-            grad_norm = torch.nn.utils.get_total_norm([p.grad for p in trainable])
+            grad_norm = torch.nn.utils.get_total_norm([p.grad for p in policy_params])
 
             self.optimizer.step()
-            self.done_optimizer.step()
             done_loss = done_loss.item()
 
             if(epoch % 10 == 0):

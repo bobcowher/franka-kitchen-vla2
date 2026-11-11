@@ -49,7 +49,7 @@ class VisionLanguageModel:
         
         self.model.to(self.device)
 
-        # Sits beside self.model, not in it, so the action optimizer never sees its weights.
+        # Kept outside self.model: it reads the last hidden state and trains at its own learning rate.
         self.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim).to(self.device)
 
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
