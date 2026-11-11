@@ -111,8 +111,9 @@ class Agent:
         self.reset_policy()
 
         # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
-        self.optimizer = Adam([{"params": [p for p in self.vlm.model.parameters() if p.requires_grad]},
-                               {"params": self.vlm.done_head.parameters(), "lr": done_learning_rate}],
+        self.optimizer = Adam([{"params": [p for n, p in self.vlm.model.named_parameters()
+                                           if p.requires_grad and not n.startswith("done_head.")]},
+                               {"params": self.vlm.model.done_head.parameters(), "lr": done_learning_rate}],
                               self.learning_rate)
 
     def _make_env(self, task, render_mode, max_episode_steps=None, **kitchen_args):

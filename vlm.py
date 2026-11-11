@@ -46,11 +46,10 @@ class VisionLanguageModel:
         # One flat output per action in the chunk; get_action_logits reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
                                                     n_actions=num_actions * chunk_size)
-        
-        self.model.to(self.device)
+        # The forward pass never calls it; _done_logits runs it on the last hidden state.
+        self.model.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim)
 
-        # Kept outside self.model: it reads the last hidden state and trains at its own learning rate.
-        self.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim).to(self.device)
+        self.model.to(self.device)
 
         self.checkpoint_path = "checkpoints/smolvlm2.pth"
 
@@ -67,8 +66,7 @@ class VisionLanguageModel:
                      if param.requires_grad}
 
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
-        torch.save({"revision": self.config["revision"], "trainable": trainable,
-                    "done_head": self.done_head.state_dict()}, checkpoint_path)
+        torch.save({"revision": self.config["revision"], "trainable": trainable}, checkpoint_path)
         print(f"Saved model checkpoint at {checkpoint_path}")
 
 
@@ -89,10 +87,9 @@ class VisionLanguageModel:
             raise ValueError(
                 f"{checkpoint_path} has parameters this model does not: "
                 f"{result.unexpected_keys}")
-        if "done_head" in checkpoint:
-            self.done_head.load_state_dict(checkpoint["done_head"])
-        else:
-            print(f"{checkpoint_path} has no done head; the stop rule will read an untrained one")
+        missing = {name for name, param in self.model.named_parameters() if param.requires_grad} & set(result.missing_keys)
+        if missing:
+            raise ValueError(f"{checkpoint_path} lacks trained parameters: {sorted(missing)}")
         print(f"Successfully loaded weights from {checkpoint_path}")
 
 
@@ -145,7 +142,7 @@ class VisionLanguageModel:
     def _done_logits(self, outputs):
         # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
         feature = outputs.hidden_states[-1][:, -1, :].detach()
-        return self.done_head(feature).squeeze(-1)
+        return self.model.done_head(feature).squeeze(-1)
 
 
     def _forward(self, images, prompts, joint_pos):
