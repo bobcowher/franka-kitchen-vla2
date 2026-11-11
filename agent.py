@@ -24,11 +24,13 @@ from torch.utils.tensorboard import SummaryWriter
 import frames
 from dataset import Dataset
 from vlm import VisionLanguageModel
-from tasks import TASK_DESCRIPTIONS, TASKS, eval_phrase, sample_phrases
+from tasks import HELDOUT_PHRASES, TASK_DESCRIPTIONS, TASK_PHRASES, TASKS, sample_phrases
 
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
+# How a rollout under the stop rule ended; success is correct or miss.
+OUTCOMES = ("correct", "false_stop", "miss", "quiet_fail")
 
 
 def git_label():
@@ -54,6 +56,7 @@ class Agent:
                  warmup_steps=200,
                  min_lr_fraction=0.1,
                  eval_rollouts=3,
+                 final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
                  done_learning_rate=3e-4,
@@ -68,7 +71,8 @@ class Agent:
         # Linear warmup over warmup_steps, then cosine decay to min_lr_fraction of the peak LR by the last epoch.
         self.warmup_steps = warmup_steps
         self.min_lr_fraction = min_lr_fraction
-        self.eval_rollouts = eval_rollouts
+        self.eval_rollouts = eval_rollouts  # per task and wording, every 1000 steps
+        self.final_eval_rollouts = final_eval_rollouts
         self.learning_rate = learning_rate
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
@@ -205,7 +209,7 @@ class Agent:
                 self.eval(epoch, summary_writer)
 
         self.vlm.save_the_model()
-        self.eval(epochs, summary_writer)
+        self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
     def _extra_done_rows(self, done_rows):
         """Rows for the done head alone: done frames with their own task, then with a task not done in that scene."""
@@ -234,13 +238,18 @@ class Agent:
         means = {name: round(float(probs[groups == name].mean()), 3) for name in sorted(set(groups))}
         return loss, means
 
-    def eval(self, epoch, summary_writer):
+    def eval(self, epoch, summary_writer, rollouts=None):
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
-        for task in EVAL_TASKS:
-            rate = sum(self.test(task, rollout=i) for i in range(self.eval_rollouts)) / self.eval_rollouts
-            summary_writer.add_scalar(f"eval/{task.replace(' ', '_')}", rate, epoch)
-            print(f"  eval {task}: {rate:.0%}")
+        rollouts = rollouts or self.eval_rollouts
+        for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
+            for task in EVAL_TASKS:
+                outcomes = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                counts = {o: outcomes.count(o) for o in OUTCOMES}
+                tag = f"eval_{wording}/{task.replace(' ', '_')}"
+                summary_writer.add_scalar(f"{tag}/success", (counts["correct"] + counts["miss"]) / rollouts, epoch)
+                summary_writer.add_scalar(f"{tag}/false_stop", counts["false_stop"] / rollouts, epoch)
+                print(f"  eval {wording} {task}: {counts}", flush=True)
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
@@ -295,22 +304,14 @@ class Agent:
         self.vlm.model.train()
         return obs, fired, info["step_task_completions"]
 
-    def test(self, task, render_mode="rgb_array", delay=0, rollout=0, prompt=None):
-        env = self._make_env(task, render_mode)
-        prompt = prompt or eval_phrase(task, rollout)
+    def test(self, task, prompt=None, render_mode="rgb_array", slowdown=1.0):
+        """One fresh-scene rollout run as play.py runs a command; returns which of OUTCOMES it ended in."""
+        env = ArmHomeWrapper(self._make_env(task, render_mode, terminate_on_tasks_completed=False,
+                                            remove_task_when_completed=False))
         obs, _ = env.reset()
-        self.reset_policy()
-        done = trunc = False
-        total_reward = 0.0
-
-        self.vlm.model.eval()
-        while not (done or trunc):
-            images, joint_pos, _ = self.process_observation(obs)
-            action = self.get_action(images, prompt, joint_pos)
-            obs, reward, done, trunc, _ = env.step(action)
-            total_reward += reward
-            time.sleep(delay)
-        self.vlm.model.train()
-
+        _, fired, completed = self.run_command(env, obs, prompt or TASKS[task], slowdown)
         env.close()
-        return total_reward > 0
+        # Judged after homing, so a door that swings shut when the gripper lets go counts as not done.
+        if fired:
+            return "correct" if task in completed else "false_stop"
+        return "miss" if task in completed else "quiet_fail"

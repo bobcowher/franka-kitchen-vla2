@@ -15,5 +15,4 @@ task = task_from_argv(sys.argv)
 agent = Agent(eval=True)
 agent.vlm.load_the_model(CHECKPOINT)
 
-success = agent.test(task, render_mode="human")
-print(f"{task}: {'success' if success else 'fail'}")
+print(f"{task}: {agent.test(task, render_mode='human')}")

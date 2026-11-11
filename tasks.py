@@ -95,16 +95,22 @@ TASK_PHRASES = {
 }
 _PHRASES_BY_DESCRIPTION = {TASKS[task]: phrases for task, phrases in TASK_PHRASES.items()}
 
+# Never trained on: eval checks the policy follows wording it hasn't seen.
+HELDOUT_PHRASES = {
+    "microwave": ["Get the microwave open", "The microwave door should end up open",
+                  "Could you open the microwave for me?", "microwave door: open"],
+    "hinge cabinet": ["Get the cabinet that is second from the left open",
+                      "The cabinet second from the left should end up open",
+                      "Could you open the cabinet next to the leftmost one?",
+                      "cabinet, second from left: open"],
+    "top burner": ["Get the top left burner going", "The knob for the top left burner should end up turned",
+                   "Could you turn on the upper left stove burner?", "top left burner knob: turn"],
+}
+
 
 def sample_phrases(task_descriptions):
     """Swap each stored task description for a random synonymous phrase."""
     return [str(np.random.choice(_PHRASES_BY_DESCRIPTION[d])) for d in task_descriptions]
-
-
-def eval_phrase(task, rollout):
-    """Phrase for an eval rollout, cycling in the fixed TASK_PHRASES order."""
-    phrases = TASK_PHRASES[task]
-    return phrases[rollout % len(phrases)]
 
 
 def task_index(task_descriptions):
