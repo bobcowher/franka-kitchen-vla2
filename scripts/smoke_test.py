@@ -32,7 +32,7 @@ images += [np.array(image.resize((size, size))), np.array(green)]
 tasks  += ["What color is the square in this image?", "Square?"]
 joint_pos = torch.cat([joint_pos, torch.zeros(2, 9, device=joint_pos.device)])
 
-batched = vlm.get_action(images, tasks, joint_pos)
+batched, _ = vlm.predict(images, tasks, joint_pos)
 print(batched)
 
 # 1. One chunk of chunk_size x 9 actions per sample.
@@ -40,13 +40,13 @@ expected = (len(images), agent.chunk_size, 9)
 assert batched.shape == expected, f"expected {expected}, got {tuple(batched.shape)}"
 
 # 2. Clamped into the normalized action range.
-assert batched.min() >= -1 and batched.max() <= 1, "get_action output escaped [-1, 1]"
+assert batched.min() >= -1 and batched.max() <= 1, "predict output escaped [-1, 1]"
 
 # 3. Batch invariance: each sample alone must match its row in the batch. Right
 #    padding, or reading the wrong position, shows up here as a large diff on
 #    the shorter prompts. bf16 noise alone stays well under the tolerance.
 for i, (img, task) in enumerate(zip(images, tasks)):
-    alone = vlm.get_action([img], [task], joint_pos[i:i + 1])
+    alone, _ = vlm.predict([img], [task], joint_pos[i:i + 1])
     diff = (alone[0].float() - batched[i].float()).abs().max().item()
     print(f"sample {i}: max |alone - batched| = {diff:.4f}  ({task!r})")
     assert diff < 0.05, f"sample {i} changes when batched"

@@ -171,7 +171,7 @@ class Agent:
             extra_rows, extra_prompts = self._extra_done_rows(done_rows)
             extra_joints = torch.tensor(self.dataset.joint_pos_memory[extra_rows], device=self.device)
 
-            pred_actions, done_logits = self.vlm.get_action_and_done_logits(
+            pred_actions, done_logits = self.vlm.forward(
                 images=images + list(self.dataset.camera_scene_memory[extra_rows]),
                 prompts=sample_phrases(tasks) + extra_prompts,
                 joint_pos=torch.cat([joint_pos, extra_joints]))
@@ -261,7 +261,7 @@ class Agent:
     def get_action(self, images, prompt, joint_pos):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
-            chunks, done_prob = self.vlm.get_action_and_done(images, [prompt], joint_pos)
+            chunks, done_prob = self.vlm.predict(images, [prompt], joint_pos)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
             self.done_prob = done_prob.item()
             self.done_streak = self.done_streak + 1 if self.done_prob >= self.done_threshold else 0
