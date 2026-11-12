@@ -153,7 +153,6 @@ class Agent:
                 return (epoch + 1) / self.warmup_steps
             progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
             return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
-        policy_params = self.optimizer.param_groups[0]["params"]
         done_rows = np.flatnonzero(self.dataset.terminal_memory[:self.dataset.mem_ctr])
         print(f"{len(done_rows)} done frames of {self.dataset.mem_ctr}", flush=True)
 
@@ -187,7 +186,6 @@ class Agent:
 
             # The done head reads detached features, so its loss only reaches its own weights.
             (loss + done_loss).backward()
-            grad_norm = torch.nn.utils.get_total_norm([p.grad for p in policy_params])
 
             self.optimizer.step()
             done_loss = done_loss.item()
@@ -199,7 +197,6 @@ class Agent:
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
-                summary_writer.add_scalar("train/grad_norm", grad_norm, epoch)
                 summary_writer.add_scalar("train/lr", lr, epoch)
 
             if(epoch % 100 == 0):
