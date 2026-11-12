@@ -197,21 +197,6 @@ class ArmHomeWrapper(Wrapper):
         # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
         return np.clip(self.kp * error / env.robot_env.act_rng[:9], -1.0, 1.0)
 
-    def return_to_home(self):
-        """Step until the arm is home. Returns (observation, steps_taken)."""
-        env = self.unwrapped
-        observation = None
-
-        for step in range(self.max_steps):
-            action = self.home_action()
-            if action is None:
-                return observation, step
-            observation, _, _, _, _ = self.env.step(action)
-
-        print(f"return_to_home gave up after {self.max_steps} steps, "
-              f"worst joint still {np.abs(self.home - env.data.qpos[:9]).max():.3f} rad off")
-        return observation, self.max_steps
-
 
 class RandomStartWrapper(Wrapper):
     """Teleports the arm to one of a handful of pre-captured poses at reset.

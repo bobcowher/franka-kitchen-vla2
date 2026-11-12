@@ -275,6 +275,9 @@ class Agent:
             if action is None:
                 break
             step(action)
+        else:
+            print(f"Homing gave up after {env.max_steps} steps, worst joint still "
+                  f"{np.abs(env.home - env.unwrapped.data.qpos[:9]).max():.3f} rad off", flush=True)
 
         info = step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
