@@ -193,11 +193,9 @@ class Agent:
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
     def _done_loss(self, logits, batch_rows):
-        """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
+        """Plain BCE on the demo's done label."""
         targets = torch.tensor(self.dataset.terminal_memory[batch_rows], dtype=logits.dtype, device=logits.device)
-        positives = targets.sum()
-        # About 4% of batches have no done frame; clamp keeps pos_weight finite there.
-        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives.clamp(min=1))
+        return F.binary_cross_entropy_with_logits(logits, targets)
 
     def eval(self, epoch, summary_writer, rollouts=None):
         # Kept per eval so a good point in training can't be overwritten by later saves.
