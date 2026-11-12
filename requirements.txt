@@ -13,5 +13,4 @@ gymnasium-robotics==1.4.2
 
 tensorboard
 torch
-pyyaml
 torchinfo

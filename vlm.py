@@ -146,11 +146,6 @@ class VisionLanguageModel:
 
 
 
-class FP32Linear(torch.nn.Linear):
-    def forward(self, input):
-        return super().forward(input.float())
-
-
 class DoneHead(nn.Module):
 
     def __init__(self, input_dim, hidden_dim=256):
@@ -174,9 +169,7 @@ class RobotControlOutputHead(nn.Module):
                  ):
         super().__init__()
 
-        self.compression_layer = FP32Linear(in_features=vla_output_dim, 
-                                            out_features=hidden_dim,
-                                            dtype=torch.float32)
+        self.compression_layer = nn.Linear(vla_output_dim, hidden_dim)
         self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)

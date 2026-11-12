@@ -1,5 +1,4 @@
 import numpy as np
-import yaml
 from gymnasium import ObservationWrapper, Wrapper, spaces
 import frames
 
@@ -39,121 +38,44 @@ class HeldSetpointWrapper(Wrapper):
 
 
 class VLAObservationWrapper(ObservationWrapper):
-    """A camera view plus proprioception, for a vision-language-action policy.
+    """The free camera at image_size plus joint positions, for a vision-language-action policy.
 
-    Returns {"camera_scene", "joint_pos", "joint_vel"}, matching the
-    camera/joint_pos/joint_vel split used by the other buffers in this repo.
-
-    Object poses are deliberately left out. The old wrapper concatenated the
-    env's achieved_goal and desired_goal onto a flat joint-state vector, which
-    made sense when the policy had no eyes. A VLA reads the scene from the image
-    and the task from the language instruction, so both were redundant anyway:
-    achieved_goal is a copy of columns already inside `observation`, and
-    desired_goal is a per-task constant. They were also the only reason the
-    observation width varied by task (61/63/73), which blocked mixing shards.
-
-    camera_scene is the free camera from DEFAULT_CAMERA_CONFIG -- the same view
-    the human window shows, so demonstrator and policy see the same thing. The
-    model's own 'left_cap' and 'right_cap' cameras point at a countertop and a
-    cabinet face; neither shows the arm, so neither is used.
-
-    There is no wrist view. One was built and aimed (see the wrist-camera
-    branch), but this environment is a fixed scene with a fixed viewpoint and
-    coarse tasks -- doors, knobs, a kettle -- so the conditions that make
-    eye-in-hand views pay off in the literature mostly do not apply here. It
-    doubled storage for a benefit this setup was unlikely to collect.
+    Renders at render_size and reduces through frames.resize, the same call load_data
+    makes on shards, so a rollout sees exactly what training saw. Object poses are
+    left out: the policy reads the scene from the image and the task from the prompt.
     """
 
-    def __init__(self, env, image_size=frames.RENDER_SIZE):
+    def __init__(self, env, image_size, render_size=frames.RENDER_SIZE):
         super().__init__(env)
+        frames.validate(render_size, image_size)  # fail here, not on the first step
         self.image_size = image_size
-        self._set_render_size(env.unwrapped, image_size)
+        # The action is one velocity per joint, so its width is the joint count.
+        self.n_joints = env.action_space.shape[0]
+        self._set_render_size(env.unwrapped, render_size)
         self.observation_space = spaces.Dict({
             "camera_scene": spaces.Box(0, 255, (image_size, image_size, 3), np.uint8),
-            "joint_pos": spaces.Box(-np.inf, np.inf, (9,), np.float32),
-            "joint_vel": spaces.Box(-np.inf, np.inf, (9,), np.float32),
+            "joint_pos": spaces.Box(-np.inf, np.inf, (self.n_joints,), np.float32),
         })
 
-    def _set_render_size(self, kitchen, image_size):
-        """Raise the render resolution above the env's 480 default.
-
-        Must run before anything renders, because the viewers read these when
-        they are first created.
-        """
+    def _set_render_size(self, kitchen, render_size):
+        """Raise the render resolution above the env's 480 default; must run before anything renders."""
         robot = kitchen.robot_env
         renderer = robot.mujoco_renderer
-        assert not renderer._viewers, (
-            "render size must be set before the first render")
-
-        # The offscreen viewer sizes itself from renderer.width/height, not from
-        # offwidth, so both have to be raised or we would upscale a 480 render.
-        # This also enlarges the teleop window, which is no bad thing.
-        robot.width = robot.height = image_size
-        renderer.width = renderer.height = image_size
-        kitchen.model.vis.global_.offwidth = image_size
-        kitchen.model.vis.global_.offheight = image_size
-
+        assert not renderer._viewers, "render size must be set before the first render"
+        # The offscreen viewer sizes itself from renderer.width/height, not offwidth, so both are raised.
+        robot.width = robot.height = render_size
+        renderer.width = renderer.height = render_size
+        kitchen.model.vis.global_.offwidth = render_size
+        kitchen.model.vis.global_.offheight = render_size
         self._renderer = renderer
 
-    def _grab(self):
-        # Renders offscreen through a second viewer, so this works even while
-        # render_mode='human' is driving the teleop window.
-        self._renderer.camera_id = -1  # free camera, per DEFAULT_CAMERA_CONFIG
+    def observation(self, observation):
+        # Offscreen through a second viewer, so this works while render_mode='human' drives a window.
+        self._renderer.camera_id = -1  # free camera, the view the human window shows
         frame = self._renderer.render("rgb_array")
-        # Should already be image_size -- _set_render_size asked for it. If it
-        # is not, resize the same way the training loader does rather than a
-        # second way, so the policy never sees two flavours of the same scene.
-        return frames.resize(frame, self.image_size)
-
-    def observation(self, observation):
-        robot_obs = observation["observation"]
         return {
-            "camera_scene": self._grab(),
-            "joint_pos": robot_obs[:9].astype(np.float32),
-            "joint_vel": robot_obs[9:18].astype(np.float32),
-        }
-
-
-class ObsReshapeWrapper(ObservationWrapper):
-    """Brings a rendered observation down to the size the policy trained on.
-
-    The collector archives at the render size so a shard stays useful to models
-    that want more pixels than today's network does. Training reduces those
-    shards in load_data; this applies the identical reduction to a live env, so
-    a rollout sees what training saw rather than something a few grey levels off
-    along every edge.
-
-    Outermost wrapper. It reshapes whatever camera_scene the layer below built,
-    so anything that wants full-resolution frames -- recording, debugging --
-    goes below it or leaves it off.
-
-    Frames stay HWC uint8, matching Dataset.sample_batch. That is what the VLM
-    processor takes; it does its own rescale and normalisation, so nothing
-    here should.
-
-    Only camera_scene is touched; joint_pos and joint_vel pass through. Named
-    for reshaping generally because a crop or a normalisation would belong here
-    too -- anything that has to happen identically on both sides of the
-    train/eval line.
-    """
-
-    def __init__(self, env, image_size):
-        super().__init__(env)
-        self.image_size = image_size
-
-        # Fail here rather than on the first step of a rollout.
-        frames.validate(env.observation_space["camera_scene"].shape[0], image_size)
-
-        self.observation_space = spaces.Dict({
-            **env.observation_space.spaces,
-            "camera_scene": spaces.Box(0, 255, (image_size, image_size, 3), np.uint8),
-        })
-
-    def observation(self, observation):
-        return {
-            **observation,
-            "camera_scene": frames.resize(observation["camera_scene"],
-                                          self.image_size),
+            "camera_scene": frames.resize(frame, self.image_size),
+            "joint_pos": observation["observation"][:self.n_joints].astype(np.float32),
         }
 
 
@@ -196,64 +118,3 @@ class ArmHomeWrapper(Wrapper):
             return None
         # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
         return np.clip(self.kp * error / env.robot_env.act_rng[:9], -1.0, 1.0)
-
-
-class RandomStartWrapper(Wrapper):
-    """Teleports the arm to one of a handful of pre-captured poses at reset.
-
-    reset_model always starts from the same qpos, so a single-start dataset
-    never shows a policy how to recover once it drifts off the one
-    trajectory it was shown -- exactly what stalled the microwave rollout
-    that motivated this. Picking a random, known-good pose from `poses_path`
-    gives demos genuinely different starts without risking the collision a
-    blind random qpos could land in: every pose in the file was reached by
-    driving the real arm there (see scripts/capture_start_poses.py).
-
-    poses_path is YAML, not npy, so a human can read, hand-edit, or
-    rebalance it -- a list of {qpos: [9 floats], frequency: weight}. frequency
-    is a relative sampling weight, not a probability; weights are normalized
-    at load time, so editing one entry's frequency is enough to rebalance,
-    without touching the others.
-
-    Objects are left exactly where reset_model put them; only the 9 arm
-    joints move, and only at episode start. This is a direct qpos write, not
-    a scripted move like ArmHomeWrapper -- nothing has happened yet at this
-    point in the episode, so there's no gripper-through-geometry risk from
-    teleporting.
-    """
-
-    def __init__(self, env, poses_path="start_poses.yaml"):
-        super().__init__(env)
-        with open(poses_path) as f:
-            entries = yaml.safe_load(f)
-        assert entries, f"no poses found in {poses_path}"
-
-        self.poses = np.array([entry["qpos"] for entry in entries], dtype=float)
-        assert self.poses.ndim == 2 and self.poses.shape[1] == 9, (
-            f"expected 9-dim qpos entries in {poses_path}, got shape {self.poses.shape}")
-
-        weights = np.array([entry.get("frequency", 1.0) for entry in entries], dtype=float)
-        self.probs = weights / weights.sum()
-
-    def reset(self, **kwargs):
-        _, info = self.env.reset(**kwargs)
-
-        kitchen = self.unwrapped
-        robot = kitchen.robot_env
-
-        pose = self.poses[np.random.choice(len(self.poses), p=self.probs)]
-        qpos = kitchen.data.qpos.copy()
-        qvel = kitchen.data.qvel.copy()
-        qpos[:9] = pose
-        qvel[:9] = 0.0
-        robot.set_state(qpos, qvel)
-
-        # env.reset() above already rendered once, showing reset_model's
-        # pose -- teleporting afterward leaves that stale frame on screen
-        # until the next env.step() happens to render again. Render now so
-        # the human window (and anyone driving off of it) shows where the
-        # arm actually is, not where it started.
-        kitchen.render()
-
-        robot_obs = robot._get_obs()
-        return kitchen._get_obs(robot_obs), info

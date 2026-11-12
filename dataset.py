@@ -1,11 +1,9 @@
 import numpy as np
 import os
 import time
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import glob
 import frames
-from tasks import task_index
 
 # Inflate and resize both release the GIL, so threads scale here where they
 # normally would not. Measured 8x on 32 cores, flat past 16.
@@ -36,30 +34,21 @@ class Dataset():
     768 KiB at 512, 588 KiB at 448, 147 KiB at 224, 48 KiB at 128.
     """
 
-    def __init__(self, max_size, image_size, n_actions, n_joints=9):
+    def __init__(self, max_size, image_size, n_actions, n_joints):
         self.mem_size = max_size
         self.mem_ctr = 0
         self.camera_scene_memory = np.zeros(
             (self.mem_size, image_size, image_size, 3), dtype=np.uint8)
         self.joint_pos_memory = np.zeros((self.mem_size, n_joints), dtype=np.float32)
-        self.joint_vel_memory = np.zeros((self.mem_size, n_joints), dtype=np.float32)
         self.action_memory = np.zeros((self.mem_size, n_actions))
-        self.reward_memory = np.zeros(self.mem_size)
         self.terminal_memory = np.zeros(self.mem_size, dtype=bool)
         self.task_description_memory = np.zeros(self.mem_size, dtype=object)
-        self.task_id_memory = np.zeros(self.mem_size, dtype=np.int64)
         # Row index one past the last step of each step's episode; action chunks must not cross it.
         self.episode_end_memory = np.zeros(self.mem_size, dtype=np.int64)
         # False for done and fumble frames in version 2 shards, which stay out of the action loss.
         self.action_ok_memory = np.ones(self.mem_size, dtype=bool)
 
-    def __len__(self):
-        return self.mem_ctr
-
-    def can_sample(self, batch_size):
-        return self.mem_ctr >= batch_size
-
-    def load_data(self, path, verbose=False):
+    def load_data(self, path):
         """Load every npz shard under path, recursively."""
         start = time.time()
         print(f"Loading data from {path}...")
@@ -86,21 +75,13 @@ class Dataset():
         with ThreadPoolExecutor(WORKERS) as pool:
             loaded = pool.map(self._read, files)
 
-            for filename, steps, (camera, data) in zip(
-                    files, steps_per_file, loaded):
-                if verbose:
-                    print(f"  {filename}: {steps} steps")
-
+            for steps, (camera, data) in zip(steps_per_file, loaded):
                 end = index + steps
                 self.camera_scene_memory[index:end] = camera
                 self.joint_pos_memory[index:end] = data['joint_pos']
-                self.joint_vel_memory[index:end] = data['joint_vel']
                 self.action_memory[index:end] = data['action']
-                self.reward_memory[index:end] = data['reward']
                 self.terminal_memory[index:end] = data['done']
-                description = str(data['task_description'])
-                self.task_description_memory[index:end] = description
-                self.task_id_memory[index:end] = task_index(description)[0]
+                self.task_description_memory[index:end] = str(data['task_description'])
                 self.episode_end_memory[index:end] = end  # each shard is one episode
                 done = data['done'].astype(bool)
                 if 'schema_version' in data:
@@ -141,7 +122,6 @@ class Dataset():
             # NHWC uint8, which is what the VLM processor takes as-is.
             "camera_scene": self.camera_scene_memory[batch],
             "joint_pos": self.joint_pos_memory[batch],
-            "joint_vel": self.joint_vel_memory[batch],
             "row": batch,
         }
 
@@ -150,91 +130,3 @@ class Dataset():
                 action_mask,
                 # Task description text, not the id: the VLM reads the instruction.
                 list(self.task_description_memory[batch]))
-
-
-class DatasetShard():
-    """One collection run's worth of VLA transitions, saved as its own file.
-
-    Overrunning max_size raises rather than wrapping: a shard is a single
-    episode, and a ring buffer would corrupt it instead of ageing out old data.
-
-    Frames go in HWC, straight off the renderer. Do not record through
-    ObsReshapeWrapper -- it hands out the reduced training size, not the
-    render size the arena is built for.
-
-    Measured over 104 microwave demos: 509 KiB per timestep, 59 steps per demo,
-    3.2 GB. Demo length drives the total, not the task count.
-
-    No next_state is stored. Behavior cloning never reads it, and within a shard
-    it is an exact duplicate of the following row.
-    """
-
-    def __init__(self, max_size, image_size, n_actions, task_name,
-                 task_description, n_joints=9):
-        self.mem_size = max_size
-        self.mem_ctr = 0
-        self.task_name = task_name
-        self.task_description = task_description
-        self.camera_scene_memory = np.zeros(
-            (self.mem_size, image_size, image_size, 3), dtype=np.uint8)
-        self.joint_pos_memory = np.zeros((self.mem_size, n_joints), dtype=np.float32)
-        self.joint_vel_memory = np.zeros((self.mem_size, n_joints), dtype=np.float32)
-        self.action_memory = np.zeros((self.mem_size, n_actions))
-        self.reward_memory = np.zeros(self.mem_size)
-        self.terminal_memory = np.zeros(self.mem_size, dtype=bool)
-
-    def __len__(self):
-        return self.mem_ctr
-
-    def store_transition(self, state, action, reward, done):
-        if self.mem_ctr >= self.mem_size:
-            raise ValueError(
-                f"shard is full at {self.mem_size} steps. Raise max_size to match "
-                f"max_episode_steps, or the episode is running longer than expected.")
-
-        index = self.mem_ctr
-
-        self.camera_scene_memory[index] = state["camera_scene"]
-        self.joint_pos_memory[index] = state["joint_pos"]
-        self.joint_vel_memory[index] = state["joint_vel"]
-        self.action_memory[index] = action
-        self.reward_memory[index] = reward
-        self.terminal_memory[index] = done
-
-        self.mem_ctr += 1
-
-    def save_to_csv(self):
-
-        date_formatted = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-
-        directory = f'dataset/{self.task_name}'
-        filename = f'{directory}/shard_{date_formatted}.npz'
-
-        os.makedirs(directory, exist_ok=True)
-
-        if os.path.exists(filename):
-            raise FileExistsError(
-                f"{filename} already exists. Shard names are second-resolution, "
-                f"so this shard would overwrite one saved in the same second.")
-
-        # savez_compressed leaves an invalid zip for the ~1s it runs, so write to
-        # a temp name and os.replace it into place. A reader then sees the whole
-        # shard or no file, which makes it safe to load a directory while a
-        # collection run is still appending to it.
-        tmp = f'{filename}.tmp'
-        with open(tmp, 'wb') as fh:
-            np.savez_compressed(fh,
-                     task_name=self.task_name,
-                     task_description=self.task_description,
-                     camera_scene=self.camera_scene_memory[:self.mem_ctr],
-                     joint_pos=self.joint_pos_memory[:self.mem_ctr],
-                     joint_vel=self.joint_vel_memory[:self.mem_ctr],
-                     action=self.action_memory[:self.mem_ctr],
-                     reward=self.reward_memory[:self.mem_ctr],
-                     done=self.terminal_memory[:self.mem_ctr])
-        os.replace(tmp, filename)
-
-        print("-" * 20)
-        print(f"Saved {filename} ({self.mem_ctr} steps, "
-              f"{os.path.getsize(filename) / 1e6:.1f} MB)")
-        print("-" * 20)

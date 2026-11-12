@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 from config import SMOLVLM2_CONFIG_500M
 from agent import Agent
 
-agent = Agent(data_path="dataset", name="bc_network")
+agent = Agent(data_path="dataset")
 vlm = agent.vlm
 
 n_params = sum(p.numel() for p in vlm.model.parameters())
@@ -23,7 +23,7 @@ ImageDraw.Draw(image).rectangle([96, 96, 288, 288], fill="red")
 # like process_observation hands out. Prompt lengths differ so padding is
 # actually exercised.
 states, _, _, tasks = agent.dataset.sample_batch(2)
-images, joint_pos, _ = agent.process_observation(states)
+images, joint_pos = agent.process_observation(states)
 
 size = agent.image_size
 green = Image.new("RGB", (size, size), "white")

@@ -16,7 +16,7 @@ import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, VLAObservationWrapper, ObsReshapeWrapper
+from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, VLAObservationWrapper
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -48,7 +48,7 @@ def masked_mse(pred, target, mask):
 
 class Agent:
 
-    def __init__(self, eval=False, data_path="dataset", name='bc_network',
+    def __init__(self, eval=False, data_path="dataset",
                  learning_rate=0.0001,
                  gripper_weight=0.125,
                  chunk_size=8,
@@ -77,23 +77,18 @@ class Agent:
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
-        self.native_image_size = 896
         max_buffer_size = 100000
 
         env = self._make_env(EVAL_TASKS[0], render_mode='rgb_array')
-        obs, _ = env.reset()
-
+        num_actions = env.action_space.shape[0]
         self.dataset = Dataset(max_size=max_buffer_size,
                                image_size=self.image_size,
-                               n_actions=env.action_space.shape[0],
-                               n_joints=9)
+                               n_actions=num_actions,
+                               n_joints=env.observation_space["joint_pos"].shape[0])
+        env.close()
 
         if not eval:
             self.dataset.load_data(path=data_path)
-
-        num_actions = env.action_space.shape[0]
-
-        env.close()
 
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -114,25 +109,19 @@ class Agent:
         env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps or self.max_episode_steps,
                        tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
         env = HeldSetpointWrapper(env)
-        env = VLAObservationWrapper(env, image_size=self.native_image_size)
-        return ObsReshapeWrapper(env, image_size=self.image_size)
+        return VLAObservationWrapper(env, image_size=self.image_size)
 
     def process_observation(self,obs):
         images    = obs['camera_scene']
-        joint_pos = obs['joint_pos']
-        joint_vel = obs['joint_vel']
-
-        joint_pos = torch.tensor(joint_pos, dtype=torch.float32).to(self.device)
-        joint_vel = torch.tensor(joint_vel, dtype=torch.float32).to(self.device)
+        joint_pos = torch.tensor(obs['joint_pos'], dtype=torch.float32).to(self.device)
 
         # Images stay uint8 HWC numpy for the processor, which moves them to
         # the GPU itself. A single frame from the env gets a batch dim here.
         if images.ndim == 3:
             images    = images[None]
             joint_pos = joint_pos.unsqueeze(0)
-            joint_vel = joint_vel.unsqueeze(0)
 
-        return list(images), joint_pos, joint_vel
+        return list(images), joint_pos
 
 
 
@@ -154,7 +143,7 @@ class Agent:
 
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
            
-            images, joint_pos, joint_vel = self.process_observation(states)
+            images, joint_pos = self.process_observation(states)
 
             actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
             action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
@@ -248,7 +237,7 @@ class Agent:
 
         fired = False
         for _ in range(self.max_episode_steps):
-            images, joint_pos, _ = self.process_observation(obs)
+            images, joint_pos = self.process_observation(obs)
             action = self.get_action(images, prompt, joint_pos)
             if self.done_streak >= self.done_patience:
                 fired = True

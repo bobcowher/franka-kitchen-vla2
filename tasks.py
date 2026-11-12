@@ -15,11 +15,6 @@ TASKS = {
     "hinge cabinet": "Open the cabinet second from the left",    # travel 1.15
 }
 
-# Dict order is what task_index()'s integer ids mean, so reordering TASKS
-# silently invalidates every checkpoint trained before the change.
-TASK_DESCRIPTIONS = list(TASKS.values())
-_TASK_INDEX = {description: i for i, description in enumerate(TASK_DESCRIPTIONS)}
-
 # Index 0 is always the description stored in the shards; order is fixed so eval rollouts stay comparable.
 TASK_PHRASES = {
     "slide cabinet": [
@@ -111,12 +106,6 @@ HELDOUT_PHRASES = {
 def sample_phrases(task_descriptions):
     """Swap each stored task description for a random synonymous phrase."""
     return [str(np.random.choice(_PHRASES_BY_DESCRIPTION[d])) for d in task_descriptions]
-
-
-def task_index(task_descriptions):
-    """task_description string, or array of them, -> int64 array of class ids."""
-    task_descriptions = np.atleast_1d(task_descriptions)
-    return np.array([_TASK_INDEX[d] for d in task_descriptions], dtype=np.int64)
 
 
 def task_from_argv(argv):
