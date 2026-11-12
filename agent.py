@@ -59,8 +59,7 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
-                 done_learning_rate=3e-4,
-                 done_near_end_steps=16):
+                 done_learning_rate=3e-4):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -75,8 +74,6 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
-        # Rows added to each batch for the done head alone; the action loss never sees them.
-        self.done_near_end_steps = done_near_end_steps
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -168,7 +165,7 @@ class Agent:
             gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
 
             loss = arm_loss + self.gripper_weight * gripper_loss
-            done_loss, done_probs = self._done_loss(done_logits, states["row"])
+            done_loss = self._done_loss(done_logits, states["row"])
 
             self.optimizer.zero_grad()
 
@@ -180,15 +177,13 @@ class Agent:
 
             if(epoch % 10 == 0):
                 summary_writer.add_scalar("done/loss", done_loss, epoch)
-                for name, prob in done_probs.items():
-                    summary_writer.add_scalar(f"done/prob_{name}", prob, epoch)
                 summary_writer.add_scalar("train/loss", loss, epoch)
                 summary_writer.add_scalar("train/arm", arm_loss, epoch)
                 summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
                 summary_writer.add_scalar("train/lr", lr, epoch)
 
             if(epoch % 100 == 0):
-                print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f} Done probs: {done_probs}", flush=True)
+                print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f}", flush=True)
                 self.vlm.save_the_model()
 
             if(epoch and epoch % 1000 == 0):
@@ -198,21 +193,11 @@ class Agent:
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
     def _done_loss(self, logits, batch_rows):
-        """BCE over the whole batch, with done frames weighted to count as much as all the others together."""
-        data = self.dataset
-        batch_done = data.terminal_memory[batch_rows]
-        near_end = (data.done_start_memory[batch_rows] - batch_rows < self.done_near_end_steps) & ~batch_done
-        groups = np.full(len(batch_rows), "demo", dtype=object)
-        groups[near_end] = "near_end"
-        groups[batch_done] = "done"
-
-        targets = torch.tensor(groups == "done", dtype=logits.dtype, device=logits.device)
+        """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
+        targets = torch.tensor(self.dataset.terminal_memory[batch_rows], dtype=logits.dtype, device=logits.device)
         positives = targets.sum()
-        loss = F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives.clamp(min=1))
-
-        probs = torch.sigmoid(logits.float()).detach().cpu().numpy()
-        means = {name: round(float(probs[groups == name].mean()), 3) for name in sorted(set(groups))}
-        return loss, means
+        # About 4% of batches have no done frame; clamp keeps pos_weight finite there.
+        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives.clamp(min=1))
 
     def eval(self, epoch, summary_writer, rollouts=None):
         # Kept per eval so a good point in training can't be overwritten by later saves.
