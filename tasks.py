@@ -88,7 +88,81 @@ TASK_PHRASES = {
         "Pull the hinged door of the second cabinet from the left open",
     ],
 }
-_PHRASES_BY_DESCRIPTION = {TASKS[task]: phrases for task, phrases in TASK_PHRASES.items()}
+# Training-only, in styles TASK_PHRASES lacks (requests, goal states, fragments, casual, long-winded).
+# None use the held-out templates ("Get X ...", "X should end up ...", "Could you ...?", "X: verb").
+STYLE_PHRASES = {
+    "slide cabinet": [
+        "Please slide the cabinet door open",
+        "Can you slide the cabinet open?",
+        "I want the sliding cabinet door open",
+        "Leave the sliding door of the cabinet open",
+        "slide cabinet open",
+        "open sliding door",
+        "Shove the sliding cabinet door over",
+        "Reach over to the cabinet with the sliding door and slide it open",
+    ],
+    "kettle": [
+        "Please put the kettle on the top left burner",
+        "Can you move the kettle to the upper left burner?",
+        "I want the kettle sitting on the top left burner",
+        "Leave the kettle on the upper left burner",
+        "kettle to top left burner",
+        "kettle on upper left burner",
+        "Plop the kettle on the top left burner",
+        "Pick up the kettle and set it down on the burner at the top left",
+    ],
+    "light switch": [
+        "Please turn on the overhead light",
+        "Can you switch the overhead light on?",
+        "I want the overhead light on",
+        "Leave the overhead light switched on",
+        "overhead light on",
+        "light switch on",
+        "Hit the overhead light",
+        "Reach up to the overhead light switch and flip it to on",
+    ],
+    "microwave": [
+        "Please open the microwave door",
+        "Can you open the microwave?",
+        "I want the microwave door open",
+        "Leave the microwave open",
+        "microwave open",
+        "open microwave door",
+        "Pop the microwave open",
+        "Grab the handle of the microwave and pull its door open",
+    ],
+    "bottom burner": [
+        "Please turn on the bottom left burner",
+        "Can you turn the knob for the lower left burner?",
+        "I want the bottom left burner on",
+        "Leave the lower left stove burner on",
+        "bottom left burner on",
+        "turn lower left knob",
+        "Crank the bottom left burner knob",
+        "Reach for the knob that runs the bottom left burner and turn it",
+    ],
+    "top burner": [
+        "Please turn on the top left burner",
+        "Can you turn the knob for the upper left burner?",
+        "I want the top left burner on",
+        "Leave the upper left stove burner on",
+        "top left burner on",
+        "turn upper left knob",
+        "Crank the top left burner knob",
+        "Reach for the knob that runs the top left burner and turn it",
+    ],
+    "hinge cabinet": [
+        "Please open the cabinet second from the left",
+        "Can you open the second cabinet from the left?",
+        "I want the second cabinet from the left open",
+        "Leave the hinged cabinet second from the left open",
+        "second cabinet from left open",
+        "open hinged cabinet",
+        "Yank open the cabinet second from the left",
+        "Take hold of the second cabinet from the left and swing its door open",
+    ],
+}
+_PHRASES_BY_DESCRIPTION = {TASKS[task]: TASK_PHRASES[task] + STYLE_PHRASES[task] for task in TASKS}
 
 # Never trained on: eval checks the policy follows wording it hasn't seen.
 HELDOUT_PHRASES = {
