@@ -59,7 +59,8 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
-                 done_learning_rate=3e-4):
+                 done_learning_rate=3e-4,
+                 false_stop_weight=2.0):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -74,6 +75,8 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        # A stop in the wrong place costs this many times a missed stop.
+        self.false_stop_weight = false_stop_weight
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -182,11 +185,12 @@ class Agent:
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
     def _done_loss(self, logits, batch_rows):
-        """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
+        """BCE on the demo's done label; not-done frames together count false_stop_weight times the done frames."""
         targets = torch.tensor(self.dataset.terminal_memory[batch_rows], dtype=logits.dtype, device=logits.device)
         positives = targets.sum()
         # About 4% of batches have no done frame; clamp keeps pos_weight finite there.
-        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives.clamp(min=1))
+        pos_weight = (len(targets) - positives) / positives.clamp(min=1) / self.false_stop_weight
+        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
 
     def eval(self, epoch, summary_writer, rollouts=None):
         # Kept per eval so a good point in training can't be overwritten by later saves.
