@@ -251,6 +251,7 @@ class Agent:
             info = step(action)
         at_stop = info["step_task_completions"]
 
+        env.begin_home()
         for _ in range(env.max_steps):
             action = env.home_action()
             if action is None:

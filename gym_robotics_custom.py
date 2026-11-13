@@ -1,3 +1,4 @@
+import mujoco
 import numpy as np
 from gymnasium import ObservationWrapper, Wrapper, spaces
 import frames
@@ -94,14 +95,18 @@ class ArmHomeWrapper(Wrapper):
     real arm. Teleporting qpos would be faster and would also let the gripper
     pass through a door it had just opened.
 
-    The gripper fingers are homed too, which means anything held gets released.
-    That is what a "ready for the next task" pose should do.
+    Homing runs in three phases. The gripper opens in place, so it lets go of a
+    handle before anything moves. The hand then backs straight toward the robot
+    base, clear of the door it just opened. Only then do the joints drive home.
+    Going straight to the joint move swings the arm through a hinge door's arc
+    and pushes it half shut (0.3 -> 0.5 from goal, outside the 0.3 success band).
 
     Homing steps are real env steps, so they count against max_episode_steps.
     Chained sessions need that raised.
     """
 
-    def __init__(self, env, kp=5.0, tolerance=0.02, max_steps=150):
+    def __init__(self, env, kp=5.0, tolerance=0.02, max_steps=500, release_steps=15,
+                 retreat_distance=0.55, retreat_speed=0.5, retreat_max_steps=250, damping=0.05):
         super().__init__(env)
         # Snapshot now: reset_model reads this attribute every reset, so anything
         # that perturbs start poses later would otherwise move our target too.
@@ -109,12 +114,54 @@ class ArmHomeWrapper(Wrapper):
         self.kp = kp
         self.tolerance = tolerance
         self.max_steps = max_steps
+        self.release_steps = release_steps
+        self.retreat_distance = retreat_distance  # metres the hand backs toward the base
+        self.retreat_speed = retreat_speed  # m/s
+        self.retreat_max_steps = retreat_max_steps
+        self.damping = damping  # damped least squares, keeps the retreat sane near singularities
+        self.phase = None
+
+    def begin_home(self):
+        """Start the next homing from its first phase, even if the last one gave up partway."""
+        self.phase = None
+
+    def _hand(self):
+        return self.unwrapped.data.site("end_effector").xpos.copy()
+
+    def _retreat_action(self):
+        """Joint velocities that move the hand along the retreat direction, fingers held open."""
+        env = self.unwrapped
+        jacp = np.zeros((3, env.model.nv))
+        mujoco.mj_jacSite(env.model, env.data, jacp, None, env.model.site("end_effector").id)
+        jac = jacp[:, :7]
+        velocity = self.retreat_speed * self.direction
+        qdot = jac.T @ np.linalg.solve(jac @ jac.T + self.damping ** 2 * np.eye(3), velocity)
+        action = np.ones(9)
+        action[:7] = np.clip(qdot / env.robot_env.act_rng[:7], -1.0, 1.0)
+        return action
 
     def home_action(self):
         """The next action toward home, or None once the arm is there."""
         env = self.unwrapped
+        if self.phase is None:
+            self.phase, self.steps = "release", 0
+        self.steps += 1
+        if self.phase == "release":
+            if self.steps <= self.release_steps:
+                return np.r_[np.zeros(7), np.ones(2)]  # fingers open at full speed, arm holds
+            base = env.data.body("panda0_link0").xpos
+            self.start = self._hand()
+            self.direction = np.r_[(base - self.start)[:2], 0.0]
+            self.direction /= np.linalg.norm(self.direction)
+            self.phase, self.steps = "retreat", 1
+        if self.phase == "retreat":
+            moved = np.dot(self._hand() - self.start, self.direction)
+            if moved < self.retreat_distance and self.steps <= self.retreat_max_steps:
+                return self._retreat_action()
+            self.phase = "joints"
         error = self.home - env.data.qpos[:9]
         if np.abs(error).max() < self.tolerance:
+            self.phase = None
             return None
         # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
         return np.clip(self.kp * error / env.robot_env.act_rng[:9], -1.0, 1.0)
