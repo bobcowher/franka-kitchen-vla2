@@ -13,7 +13,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256):
+    def __init__(self, vlm_config, num_actions, chunk_size=1):
 
         torch.manual_seed(123)
 
@@ -46,8 +46,8 @@ class VisionLanguageModel:
         # One flat output per action in the chunk; forward reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
                                                     n_actions=num_actions * chunk_size)
-        # The HF forward never calls it; our forward runs it on the last hidden state.
-        self.model.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim)
+        # Same shape as the action head. The HF forward never calls it; our forward runs it on the last hidden state.
+        self.model.done_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"], n_actions=1)
 
         self.model.to(self.device)
 
@@ -134,7 +134,7 @@ class VisionLanguageModel:
 
         actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
         # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
+        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach().float()).squeeze(-1)
         return actions, done
 
 
@@ -144,20 +144,6 @@ class VisionLanguageModel:
         actions, done = self.forward(images, prompts, joint_pos)
         return torch.clamp(actions, -1, 1), torch.sigmoid(done)
 
-
-
-class DoneHead(nn.Module):
-
-    def __init__(self, input_dim, hidden_dim=256):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x.float()))
-        x = F.relu(self.fc2(x))
-        return self.output(x)
 
 
 class RobotControlOutputHead(nn.Module):
