@@ -13,7 +13,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256):
+    def __init__(self, vlm_config, num_actions, chunk_size=1):
 
         torch.manual_seed(123)
 
@@ -43,11 +43,9 @@ class VisionLanguageModel:
         for param in self.model.model.text_model.layers[-4:].parameters():
             param.requires_grad = True
 
-        # One flat output per action in the chunk; forward reshapes it to (chunk, actions).
+        # One flat output per action in the chunk plus a done logit; forward splits and reshapes them.
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
                                                     n_actions=num_actions * chunk_size)
-        # The HF forward never calls it; our forward runs it on the last hidden state.
-        self.model.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim)
 
         self.model.to(self.device)
 
@@ -130,12 +128,11 @@ class VisionLanguageModel:
 
         # Runs matmuls in bf16 so the fp32 and bf16 layers can mix; gradients still land on fp32 weights.
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            outputs = self.model(**inputs, output_hidden_states=True)
+            outputs = self.model(**inputs)
 
-        actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
-        # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
-        return actions, done
+        logits = outputs.logits[:, -1, :].float()
+        actions = logits[:, :-1].view(len(prompts), self.chunk_size, self.num_actions)
+        return actions, logits[:, -1]
 
 
     @torch.no_grad
@@ -144,20 +141,6 @@ class VisionLanguageModel:
         actions, done = self.forward(images, prompts, joint_pos)
         return torch.clamp(actions, -1, 1), torch.sigmoid(done)
 
-
-
-class DoneHead(nn.Module):
-
-    def __init__(self, input_dim, hidden_dim=256):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, 1)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x.float()))
-        x = F.relu(self.fc2(x))
-        return self.output(x)
 
 
 class RobotControlOutputHead(nn.Module):
@@ -174,14 +157,14 @@ class RobotControlOutputHead(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.output = nn.Linear(hidden_dim, n_actions)
+        self.done_output = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
         x = F.relu(self.compression_layer(x))
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
-        x = self.output(x)
-        return x
+        return torch.cat([self.output(x), self.done_output(x)], dim=-1)
 
 
 

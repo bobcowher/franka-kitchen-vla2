@@ -98,10 +98,10 @@ class Agent:
                                        chunk_size=self.chunk_size)
         self.reset_policy()
 
-        # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
+        # Group 0 is the policy, which follows the LR schedule; group 1 is the done output layer at a constant rate.
         self.optimizer = Adam([{"params": [p for n, p in self.vlm.model.named_parameters()
-                                           if p.requires_grad and not n.startswith("done_head.")]},
-                               {"params": self.vlm.model.done_head.parameters(), "lr": done_learning_rate}],
+                                           if p.requires_grad and not n.startswith("lm_head.done_output.")]},
+                               {"params": self.vlm.model.lm_head.done_output.parameters(), "lr": done_learning_rate}],
                               self.learning_rate)
 
     def _make_env(self, task, render_mode, max_episode_steps=None, **kitchen_args):
@@ -158,7 +158,7 @@ class Agent:
 
             self.optimizer.zero_grad()
 
-            # The done head reads detached features, so its loss only reaches its own weights.
+            # The done loss also trains the shared head layers and the unfrozen backbone.
             (loss + done_loss).backward()
 
             self.optimizer.step()
