@@ -41,7 +41,7 @@ while True:
     prompt = typed or prompt
     if prompt is None:
         continue
-    obs, fired, completed = agent.run_command(env, obs, prompt, slowdown=args.slowdown)
+    obs, fired, _, completed = agent.run_command(env, obs, prompt, slowdown=args.slowdown)
     print(f"done {'fired' if fired else 'never fired'}, went home. Complete now: {', '.join(completed) or 'nothing'}")
 
 env.close()
