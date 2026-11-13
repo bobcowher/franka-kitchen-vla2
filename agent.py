@@ -29,7 +29,7 @@ from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-# How a rollout under the stop rule ended; success is correct or miss.
+# How a rollout ended under the stop rule, judged when the policy stopped; success is correct or miss.
 OUTCOMES = ("correct", "false_stop", "miss", "quiet_fail")
 
 
@@ -194,11 +194,14 @@ class Agent:
         rollouts = rollouts or self.eval_rollouts
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
-                outcomes = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                results = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                outcomes = [outcome for outcome, _ in results]
                 counts = {o: outcomes.count(o) for o in OUTCOMES}
+                counts["undone_by_homing"] = sum(undone for _, undone in results)
                 tag = f"eval_{wording}/{task.replace(' ', '_')}"
                 summary_writer.add_scalar(f"{tag}/success", (counts["correct"] + counts["miss"]) / rollouts, epoch)
                 summary_writer.add_scalar(f"{tag}/false_stop", counts["false_stop"] / rollouts, epoch)
+                summary_writer.add_scalar(f"{tag}/undone_by_homing", counts["undone_by_homing"] / rollouts, epoch)
                 print(f"  eval {wording} {task}: {counts}", flush=True)
 
     def reset_policy(self):
@@ -222,7 +225,9 @@ class Agent:
         return ArmHomeWrapper(env)
 
     def run_command(self, env, obs, prompt, slowdown=1.0):
-        """Act until the done rule fires or time runs out, then go home. Returns (obs, done fired, completed tasks)."""
+        """Act until the done rule fires or time runs out, then go home.
+
+        Returns (obs, done fired, tasks complete when the policy stopped, tasks complete after homing)."""
         self.reset_policy()
         self.vlm.model.eval()
         last_step = time.time()
@@ -236,13 +241,15 @@ class Agent:
             return step_info
 
         fired = False
+        info = {"step_task_completions": []}
         for _ in range(self.max_episode_steps):
             images, joint_pos = self.process_observation(obs)
             action = self.get_action(images, prompt, joint_pos)
             if self.done_streak >= self.done_patience:
                 fired = True
                 break
-            step(action)
+            info = step(action)
+        at_stop = info["step_task_completions"]
 
         for _ in range(env.max_steps):
             action = env.home_action()
@@ -255,16 +262,15 @@ class Agent:
 
         info = step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
-        return obs, fired, info["step_task_completions"]
+        return obs, fired, at_stop, info["step_task_completions"]
 
     def test(self, task, prompt=None, render_mode="rgb_array", slowdown=1.0):
-        """One fresh-scene rollout run as play.py runs a command; returns which of OUTCOMES it ended in."""
+        """One fresh-scene rollout run as play.py runs a command; returns (one of OUTCOMES, undone by homing)."""
         env = ArmHomeWrapper(self._make_env(task, render_mode, terminate_on_tasks_completed=False,
                                             remove_task_when_completed=False))
         obs, _ = env.reset()
-        _, fired, completed = self.run_command(env, obs, prompt or TASKS[task], slowdown)
+        _, fired, at_stop, after_home = self.run_command(env, obs, prompt or TASKS[task], slowdown)
         env.close()
-        # Judged after homing, so a door that swings shut when the gripper lets go counts as not done.
-        if fired:
-            return "correct" if task in completed else "false_stop"
-        return "miss" if task in completed else "quiet_fail"
+        done = task in at_stop
+        outcome = ("correct" if done else "false_stop") if fired else ("miss" if done else "quiet_fail")
+        return outcome, done and task not in after_home
