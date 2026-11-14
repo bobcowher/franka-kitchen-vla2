@@ -168,11 +168,11 @@ class Agent:
             done_loss = done_loss.item()
 
             if(epoch % 10 == 0):
-                summary_writer.add_scalar("done/loss", done_loss, epoch)
-                summary_writer.add_scalar("train/loss", loss, epoch)
-                summary_writer.add_scalar("train/arm", arm_loss, epoch)
-                summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
-                summary_writer.add_scalar("train/lr", lr, epoch)
+                summary_writer.add_scalar("loss/action", loss, epoch)  # what the policy minimizes: arm + gripper_weight * gripper
+                summary_writer.add_scalar("loss/arm_joints", arm_loss, epoch)
+                summary_writer.add_scalar("loss/gripper", gripper_loss, epoch)
+                summary_writer.add_scalar("loss/done", done_loss, epoch)
+                summary_writer.add_scalar("optim/lr", lr, epoch)
 
             if(epoch % 100 == 0):
                 print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f}", flush=True)
@@ -195,15 +195,20 @@ class Agent:
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         rollouts = rollouts or self.eval_rollouts
+        results = {}  # (wording, task) -> [(reached, stop)]
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
-                results = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
-                counts = {"reached": sum(reached for reached, _ in results)}
-                counts.update({s: sum(stop == s for _, stop in results) for s in STOPS})
-                tag = f"eval_{wording}/{task.replace(' ', '_')}"
-                for name in ("reached", "on_time", "early", "false_stop"):
-                    summary_writer.add_scalar(f"{tag}/{name}", counts[name] / rollouts, epoch)
+                results[wording, task] = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                counts = {"reached": sum(reached for reached, _ in results[wording, task])}
+                counts.update({s: sum(stop == s for _, stop in results[wording, task]) for s in STOPS})
                 print(f"  eval {wording} {task}: {counts}", flush=True)
+        # TensorBoard gets totals; per-cell detail (early, late, ...) is in the printout above.
+        groups = {"all": list(results), "heldout_wording": [k for k in results if k[0] == "heldout"]}
+        groups.update({task.replace(" ", "_"): [k for k in results if k[1] == task] for task in EVAL_TASKS})
+        for name, keys in groups.items():
+            rows = [r for k in keys for r in results[k]]
+            summary_writer.add_scalar(f"eval_success/{name}", sum(reached for reached, _ in rows) / len(rows), epoch)
+            summary_writer.add_scalar(f"eval_stop/{name}", sum(stop == "on_time" for _, stop in rows) / len(rows), epoch)
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
