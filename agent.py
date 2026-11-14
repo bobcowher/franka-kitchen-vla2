@@ -30,8 +30,8 @@ from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-# How a rollout ended under the stop rule, judged when the policy stopped; success is correct or miss.
-OUTCOMES = ("correct", "false_stop", "miss", "quiet_fail")
+# When the policy first stopped: within done_window of the first reward, before it, not by the window's end, or (no reward) at all or never.
+STOPS = ("on_time", "early", "late", "false_stop", "none")
 
 
 def git_label():
@@ -60,6 +60,7 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
+                 done_window=20,
                  done_learning_rate=3e-4):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
@@ -75,6 +76,7 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -196,13 +198,11 @@ class Agent:
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
                 results = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
-                outcomes = [outcome for outcome, _ in results]
-                counts = {o: outcomes.count(o) for o in OUTCOMES}
-                counts["undone_by_homing"] = sum(undone for _, undone in results)
+                counts = {"reached": sum(reached for reached, _ in results)}
+                counts.update({s: sum(stop == s for _, stop in results) for s in STOPS})
                 tag = f"eval_{wording}/{task.replace(' ', '_')}"
-                summary_writer.add_scalar(f"{tag}/success", (counts["correct"] + counts["miss"]) / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/false_stop", counts["false_stop"] / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/undone_by_homing", counts["undone_by_homing"] / rollouts, epoch)
+                for name in ("reached", "on_time", "early", "false_stop"):
+                    summary_writer.add_scalar(f"{tag}/{name}", counts[name] / rollouts, epoch)
                 print(f"  eval {wording} {task}: {counts}", flush=True)
 
     def reset_policy(self):
@@ -262,13 +262,36 @@ class Agent:
         self.vlm.model.train()
         return obs, fired, at_stop, info["step_task_completions"]
 
-    def test(self, task, prompt=None, render_mode="rgb_array", slowdown=1.0):
-        """One fresh-scene rollout run as play.py runs a command; returns (one of OUTCOMES, undone by homing)."""
-        env = ArmHomeWrapper(self._make_env(task, render_mode, terminate_on_tasks_completed=False,
-                                            remove_task_when_completed=False))
+    def test(self, task, prompt=None, render_mode="rgb_array"):
+        """One fresh-scene rollout scored two ways; returns (reached, one of STOPS).
+
+        reached: the task gave a reward at any step. The stop is judged on its own:
+        a stop does not end the rollout, so an early stop can't hide a reach.
+        It runs until done_window steps after the first reward, or the step limit
+        if the task is never reached. There is no homing; it has its own test."""
+        env = self._make_env(task, render_mode, max_episode_steps=self.max_episode_steps + self.done_window,
+                             terminate_on_tasks_completed=False, remove_task_when_completed=False)
         obs, _ = env.reset()
-        _, fired, at_stop, after_home = self.run_command(env, obs, prompt or TASKS[task], slowdown)
+        self.reset_policy()
+        self.vlm.model.eval()
+        reward_at = stop_at = None
+        for t in range(self.max_episode_steps + self.done_window):
+            if reward_at is None and t >= self.max_episode_steps:
+                break
+            images, joint_pos = self.process_observation(obs)
+            action = self.get_action(images, prompt or TASKS[task], joint_pos)
+            if stop_at is None and self.done_streak >= self.done_patience:
+                stop_at = t
+            # Past the first reward, the first stop or the window's end settles the outcome.
+            if reward_at is not None and (stop_at is not None or t >= reward_at + self.done_window):
+                break
+            obs, _, _, _, info = env.step(action)
+            if reward_at is None and task in info["step_task_completions"]:
+                reward_at = t + 1
         env.close()
-        done = task in at_stop
-        outcome = ("correct" if done else "false_stop") if fired else ("miss" if done else "quiet_fail")
-        return outcome, done and task not in after_home
+        self.vlm.model.train()
+        if reward_at is None:
+            return False, "none" if stop_at is None else "false_stop"
+        if stop_at is None:
+            return True, "late"
+        return True, "early" if stop_at < reward_at else "on_time"
