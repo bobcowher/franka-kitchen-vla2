@@ -195,25 +195,27 @@ class Agent:
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         rollouts = rollouts or self.eval_rollouts
-        results = {}  # (wording, task) -> [(reached, stop)]
+        rows = []  # (wording, task, reached, stop), one per rollout
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
-                results[wording, task] = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
-                counts = {"reached": sum(reached for reached, _ in results[wording, task])}
-                counts.update({s: sum(stop == s for _, stop in results[wording, task]) for s in STOPS})
+                cell = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                counts = {"reached": sum(reached for reached, _ in cell)}
+                counts.update({s: sum(stop == s for _, stop in cell) for s in STOPS})
                 print(f"  eval {wording} {task}: {counts}", flush=True)
+                rows += [(wording, task, reached, stop) for reached, stop in cell]
+
         # TensorBoard gets totals; per-cell detail (early, late, ...) is in the printout above.
-        groups = {"all": list(results), "heldout_wording": [k for k in results if k[0] == "heldout"]}
-        groups.update({task.replace(" ", "_"): [k for k in results if k[1] == task] for task in EVAL_TASKS})
-        for name, keys in groups.items():
-            rows = [r for k in keys for r in results[k]]
-            summary_writer.add_scalar(f"eval_success/{name}", sum(reached for reached, _ in rows) / len(rows), epoch)
-            summary_writer.add_scalar(f"eval_stop/{name}", sum(stop == "on_time" for _, stop in rows) / len(rows), epoch)
+        def log(name, picked):
+            summary_writer.add_scalar(f"eval_success/{name}", np.mean([r[2] for r in picked]), epoch)
+            summary_writer.add_scalar(f"eval_stop/{name}", np.mean([r[3] == "on_time" for r in picked]), epoch)
+        log("all", rows)
+        log("heldout_wording", [r for r in rows if r[0] == "heldout"])
+        for task in EVAL_TASKS:
+            log(task.replace(" ", "_"), [r for r in rows if r[1] == task])
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
         self.action_queue = []
-        self.done_prob = 0.0
         self.done_streak = 0
 
     def get_action(self, images, prompt, joint_pos):
@@ -221,8 +223,7 @@ class Agent:
         if not self.action_queue:
             chunks, done_prob = self.vlm.predict(images, [prompt], joint_pos)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
-            self.done_prob = done_prob.item()
-            self.done_streak = self.done_streak + 1 if self.done_prob >= self.done_threshold else 0
+            self.done_streak = self.done_streak + 1 if done_prob.item() >= self.done_threshold else 0
         return self.action_queue.pop(0)
 
     def make_session_env(self, render_mode="human"):
@@ -277,14 +278,15 @@ class Agent:
         env = self._make_env(task, render_mode, max_episode_steps=self.max_episode_steps + self.done_window,
                              terminate_on_tasks_completed=False, remove_task_when_completed=False)
         obs, _ = env.reset()
+        prompt = prompt or TASKS[task]
         self.reset_policy()
         self.vlm.model.eval()
-        reward_at = stop_at = None
+        reward_at = stop_at = None  # both in env steps taken: stop_at before this step's action, reward_at after it
         for t in range(self.max_episode_steps + self.done_window):
             if reward_at is None and t >= self.max_episode_steps:
                 break
             images, joint_pos = self.process_observation(obs)
-            action = self.get_action(images, prompt or TASKS[task], joint_pos)
+            action = self.get_action(images, prompt, joint_pos)
             if stop_at is None and self.done_streak >= self.done_patience:
                 stop_at = t
             # Past the first reward, the first stop or the window's end settles the outcome.
