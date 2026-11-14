@@ -282,19 +282,29 @@ class Agent:
         self.reset_policy()
         self.vlm.model.eval()
         reward_at = stop_at = None  # both in env steps taken: stop_at before this step's action, reward_at after it
-        for t in range(self.max_episode_steps + self.done_window):
-            if reward_at is None and t >= self.max_episode_steps:
-                break
+
+        def act(t):
+            """The policy's next action; notes the step of its first stop."""
+            nonlocal stop_at
             images, joint_pos = self.process_observation(obs)
             action = self.get_action(images, prompt, joint_pos)
             if stop_at is None and self.done_streak >= self.done_patience:
                 stop_at = t
-            # Past the first reward, the first stop or the window's end settles the outcome.
-            if reward_at is not None and (stop_at is not None or t >= reward_at + self.done_window):
-                break
-            obs, _, _, _, info = env.step(action)
-            if reward_at is None and task in info["step_task_completions"]:
+            return action
+
+        # Until the first reward or the step limit. A stop here is early, or false if no reward follows.
+        for t in range(self.max_episode_steps):
+            obs, _, _, _, info = env.step(act(t))
+            if task in info["step_task_completions"]:
                 reward_at = t + 1
+                break
+        # After the reward, done_window steps for the policy to stop.
+        if reward_at is not None:
+            for t in range(reward_at, reward_at + self.done_window):
+                action = act(t)
+                if stop_at is not None:
+                    break
+                obs, _, _, _, info = env.step(action)
         env.close()
         self.vlm.model.train()
         if reward_at is None:
