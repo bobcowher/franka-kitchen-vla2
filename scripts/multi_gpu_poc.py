@@ -115,6 +115,7 @@ class PocTrainer:
         if self.checkpointing:
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.config.use_cache = False
+        model.train()  # from_pretrained returns eval mode, and HF only checkpoints in training mode
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         print(f"{self.model_name}: {total / 1e9:.2f}B params, {trainable / 1e9:.2f}B trainable "
