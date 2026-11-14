@@ -26,7 +26,7 @@ from dataset import Dataset
 from vlm import VisionLanguageModel
 from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 
-from config import SMOLVLM2_CONFIG_500M
+from config import SMOLVLM2_CONFIG_500M, SMOLVLM2_CONFIG_2_2B
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 # How a rollout ended under the stop rule, judged when the policy stopped; success is correct or miss.
@@ -41,9 +41,10 @@ def git_label():
 
 
 # Chunks near a demo's end run past it; mask zeroes those steps so the arm isn't taught to keep moving after the demo stops.
-def masked_mse(pred, target, mask):
+# Divided by the whole batch's mask count, so micro-batch pieces add up to the batch's masked mean.
+def masked_mse(pred, target, mask, mask_total):
     per_step = ((pred - target) ** 2).mean(dim=-1)
-    return (per_step * mask).sum() / mask.sum()
+    return (per_step * mask).sum() / mask_total
 
 
 class Agent:
@@ -59,7 +60,10 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
-                 done_learning_rate=3e-4):
+                 done_learning_rate=3e-4,
+                 vlm_config=SMOLVLM2_CONFIG_500M,
+                 lora_rank=16,
+                 micro_batch_size=None):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -74,6 +78,8 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        self.lora_rank = lora_rank  # 0 unfreezes the last four layers in full; >0 trains adapters on every layer
+        self.micro_batch_size = micro_batch_size  # each batch runs in pieces this size with gradients summed; None is one piece
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -93,9 +99,10 @@ class Agent:
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
         
-        self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
+        self.vlm = VisionLanguageModel(vlm_config=vlm_config,
                                        num_actions=num_actions,
-                                       chunk_size=self.chunk_size)
+                                       chunk_size=self.chunk_size,
+                                       lora_rank=lora_rank)
         self.reset_policy()
 
         # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
@@ -148,19 +155,27 @@ class Agent:
             actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
             action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
 
-            pred_actions, done_logits = self.vlm.forward(images, sample_phrases(tasks), joint_pos)
-
-            arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
-            gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
-
-            loss = arm_loss + self.gripper_weight * gripper_loss
-            done_loss = self._done_loss(done_logits, states["row"])
+            phrases = sample_phrases(tasks)
+            done_targets = torch.tensor(self.dataset.terminal_memory[states["row"]], dtype=torch.float32, device=self.device)
+            positives = done_targets.sum()
+            # About 4% of batches have no done frame; clamp keeps pos_weight finite there.
+            pos_weight = (batch_size - positives) / positives.clamp(min=1)
+            mask_total = action_mask.sum()
 
             self.optimizer.zero_grad()
+            arm_loss = gripper_loss = done_loss = 0.0
+            piece = self.micro_batch_size or batch_size
+            for start in range(0, batch_size, piece):
+                part = slice(start, start + piece)
+                pred_actions, done_logits = self.vlm.forward(images[part], phrases[part], joint_pos[part])
+                arm     = masked_mse(pred_actions[..., :7], actions[part, :, :7], action_mask[part], mask_total)
+                gripper = masked_mse(pred_actions[..., 7:], actions[part, :, 7:], action_mask[part], mask_total)
+                done    = self._done_loss(done_logits, done_targets[part], pos_weight, batch_size)
+                # The done head reads detached features, so its loss only reaches its own weights.
+                (arm + self.gripper_weight * gripper + done).backward()
+                arm_loss, gripper_loss, done_loss = arm_loss + arm.detach(), gripper_loss + gripper.detach(), done_loss + done.detach()
 
-            # The done head reads detached features, so its loss only reaches its own weights.
-            (loss + done_loss).backward()
-
+            loss = arm_loss + self.gripper_weight * gripper_loss
             self.optimizer.step()
             done_loss = done_loss.item()
 
@@ -181,12 +196,11 @@ class Agent:
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
-    def _done_loss(self, logits, batch_rows):
-        """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
-        targets = torch.tensor(self.dataset.terminal_memory[batch_rows], dtype=logits.dtype, device=logits.device)
-        positives = targets.sum()
-        # About 4% of batches have no done frame; clamp keeps pos_weight finite there.
-        return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=(len(targets) - positives) / positives.clamp(min=1))
+    def _done_loss(self, logits, targets, pos_weight, batch_size):
+        """BCE on the demo's done label, done frames weighted to count as much as all the others together.
+
+        Summed and divided by the whole batch size, so micro-batch pieces add up to the batch mean."""
+        return F.binary_cross_entropy_with_logits(logits.float(), targets, pos_weight=pos_weight, reduction="sum") / batch_size
 
     def eval(self, epoch, summary_writer, rollouts=None):
         # Kept per eval so a good point in training can't be overwritten by later saves.

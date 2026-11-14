@@ -1,3 +1,4 @@
+import math
 import os
 import torch
 import torch.nn.functional as F
@@ -13,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, lora_rank=0, lora_alpha=32):
 
         torch.manual_seed(123)
 
@@ -38,10 +39,14 @@ class VisionLanguageModel:
         for param in self.model.parameters():
             param.requires_grad = False
 
-        # Trained weights need fp32 so Adam's small updates aren't rounded away; autocast below bridges the dtypes.
-        self.model.model.text_model.layers[-4:].float()
-        for param in self.model.model.text_model.layers[-4:].parameters():
-            param.requires_grad = True
+        if lora_rank:
+            # Adapters on every layer instead of unfreezing the last four; the backbone stays frozen bf16.
+            add_lora(self.model.model.text_model, lora_rank, lora_alpha)
+        else:
+            # Trained weights need fp32 so Adam's small updates aren't rounded away; autocast below bridges the dtypes.
+            self.model.model.text_model.layers[-4:].float()
+            for param in self.model.model.text_model.layers[-4:].parameters():
+                param.requires_grad = True
 
         # One flat output per action in the chunk; forward reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
@@ -125,7 +130,7 @@ class VisionLanguageModel:
 
 
         inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=False,
-                                do_resize=False)
+                                do_resize=self.config.get("processor_resize", False))
         inputs = inputs.to(self.device, dtype=self.model.dtype)
 
         # Runs matmuls in bf16 so the fp32 and bf16 layers can mix; gradients still land on fp32 weights.
@@ -144,6 +149,31 @@ class VisionLanguageModel:
         actions, done = self.forward(images, prompts, joint_pos)
         return torch.clamp(actions, -1, 1), torch.sigmoid(done)
 
+
+
+class LoRALinear(nn.Module):
+    """A frozen linear layer plus a trainable low-rank update: W x + (alpha/r) B A x, with B starting at zero."""
+
+    def __init__(self, base, rank, alpha):
+        super().__init__()
+        self.base = base
+        self.scale = alpha / rank
+        self.down = nn.Linear(base.in_features, rank, bias=False)  # fp32, so Adam's small updates survive
+        self.up = nn.Linear(rank, base.out_features, bias=False)
+        nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.up.weight)  # starts as exactly the pretrained layer
+
+    def forward(self, x):
+        return self.base(x) + self.up(self.down(x)) * self.scale
+
+
+def add_lora(text_model, rank, alpha):
+    """Adapters on every attention and MLP projection; everything else in the text model stays frozen."""
+    for layer in text_model.layers:
+        for parent, names in ((layer.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")),
+                              (layer.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for name in names:
+                setattr(parent, name, LoRALinear(getattr(parent, name), rank, alpha))
 
 
 class DoneHead(nn.Module):
