@@ -119,49 +119,34 @@ class ArmHomeWrapper(Wrapper):
         self.retreat_speed = retreat_speed  # m/s
         self.retreat_max_steps = retreat_max_steps
         self.damping = damping  # damped least squares, keeps the retreat sane near singularities
-        self.phase = None
 
-    def begin_home(self):
-        """Start the next homing from its first phase, even if the last one gave up partway."""
-        self.phase = None
-
-    def _hand(self):
+    def _hand_position(self):
         return self.unwrapped.data.site("end_effector").xpos.copy()
 
-    def _retreat_action(self):
-        """Joint velocities that move the hand along the retreat direction, fingers held open."""
+    def _retreat_action(self, direction):
+        """Joint velocities that move the hand along direction, fingers held open."""
         env = self.unwrapped
         jacp = np.zeros((3, env.model.nv))
         mujoco.mj_jacSite(env.model, env.data, jacp, None, env.model.site("end_effector").id)
         jac = jacp[:, :7]
-        velocity = self.retreat_speed * self.direction
+        velocity = self.retreat_speed * direction
         qdot = jac.T @ np.linalg.solve(jac @ jac.T + self.damping ** 2 * np.eye(3), velocity)
         action = np.ones(9)
         action[:7] = np.clip(qdot / env.robot_env.act_rng[:7], -1.0, 1.0)
         return action
 
-    def home_action(self):
-        """The next action toward home, or None once the arm is there."""
+    def home_actions(self):
+        """Yields actions toward home until the arm is there; the caller steps each one."""
         env = self.unwrapped
-        if self.phase is None:
-            self.phase, self.steps = "release", 0
-        self.steps += 1
-        if self.phase == "release":
-            if self.steps <= self.release_steps:
-                return np.r_[np.zeros(7), np.ones(2)]  # fingers open at full speed, arm holds
-            base = env.data.body("panda0_link0").xpos
-            self.start = self._hand()
-            self.direction = np.r_[(base - self.start)[:2], 0.0]
-            self.direction /= np.linalg.norm(self.direction)
-            self.phase, self.steps = "retreat", 1
-        if self.phase == "retreat":
-            moved = np.dot(self._hand() - self.start, self.direction)
-            if moved < self.retreat_distance and self.steps <= self.retreat_max_steps:
-                return self._retreat_action()
-            self.phase = "joints"
-        error = self.home - env.data.qpos[:9]
-        if np.abs(error).max() < self.tolerance:
-            self.phase = None
-            return None
-        # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
-        return np.clip(self.kp * error / env.robot_env.act_rng[:9], -1.0, 1.0)
+        for _ in range(self.release_steps):
+            yield np.r_[np.zeros(7), np.ones(2)]  # fingers open at full speed, arm holds
+        start = self._hand_position()
+        direction = np.r_[(env.data.body("panda0_link0").xpos - start)[:2], 0.0]
+        direction /= np.linalg.norm(direction)
+        for _ in range(self.retreat_max_steps):
+            if np.dot(self._hand_position() - start, direction) >= self.retreat_distance:
+                break
+            yield self._retreat_action(direction)
+        while np.abs(self.home - env.data.qpos[:9]).max() >= self.tolerance:
+            # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
+            yield np.clip(self.kp * (self.home - env.data.qpos[:9]) / env.robot_env.act_rng[:9], -1.0, 1.0)

@@ -9,6 +9,7 @@ if not os.environ.get("DISPLAY"):
 import numpy as np
 import torch
 import torch.nn.functional as F
+import itertools
 import math
 import time
 import datetime
@@ -251,15 +252,11 @@ class Agent:
             info = step(action)
         at_stop = info["step_task_completions"]
 
-        env.begin_home()
-        for _ in range(env.max_steps):
-            action = env.home_action()
-            if action is None:
-                break
+        for action in itertools.islice(env.home_actions(), env.max_steps):
             step(action)
-        else:
-            print(f"Homing gave up after {env.max_steps} steps, worst joint still "
-                  f"{np.abs(env.home - env.unwrapped.data.qpos[:9]).max():.3f} rad off", flush=True)
+        worst = np.abs(env.home - env.unwrapped.data.qpos[:9]).max()
+        if worst >= env.tolerance:
+            print(f"Homing gave up after {env.max_steps} steps, worst joint still {worst:.3f} rad off", flush=True)
 
         info = step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
