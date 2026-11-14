@@ -11,13 +11,12 @@ import torch
 import torch.nn.functional as F
 import itertools
 import math
-import time
 import datetime
 import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, VLAObservationWrapper
+from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, RealTimeWrapper, VLAObservationWrapper
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -34,10 +33,13 @@ EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
 STOPS = ("on_time", "early", "late", "false_stop", "none")
 
 
+def git(*args):
+    """A git command's stdout, or "" if git fails."""
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
+
+
 def git_label():
     """branch_shorthash for run names; the hash pins the exact code even if the branch name is off."""
-    def git(*args):
-        return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
     return f"{git('branch', '--show-current') or 'detached'}_{git('rev-parse', '--short', 'HEAD') or 'nogit'}"
 
 
@@ -111,6 +113,8 @@ class Agent:
         tasks = task if isinstance(task, list) else [task]
         env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps or self.max_episode_steps,
                        tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
+        if render_mode == "human":
+            env = RealTimeWrapper(env)
         env = HeldSetpointWrapper(env)
         return VLAObservationWrapper(env, image_size=self.image_size)
 
@@ -133,15 +137,10 @@ class Agent:
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
-        def lr_factor(epoch):
-            if epoch < self.warmup_steps:
-                return (epoch + 1) / self.warmup_steps
-            progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
-            return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
         print(f"{self.dataset.terminal_memory[:self.dataset.mem_ctr].sum()} done frames of {self.dataset.mem_ctr}", flush=True)
 
         for epoch in range(epochs):
-            lr = self.learning_rate * lr_factor(epoch)
+            lr = self.learning_rate * self._lr_factor(epoch, epochs)
             self.optimizer.param_groups[0]["lr"] = lr
 
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
@@ -184,6 +183,13 @@ class Agent:
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
 
+    def _lr_factor(self, epoch, epochs):
+        """Linear warmup over warmup_steps, then cosine decay to min_lr_fraction by the last epoch."""
+        if epoch < self.warmup_steps:
+            return (epoch + 1) / self.warmup_steps
+        progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
+        return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
+
     def _done_loss(self, logits, batch_rows):
         """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
         targets = torch.tensor(self.dataset.terminal_memory[batch_rows], dtype=logits.dtype, device=logits.device)
@@ -205,13 +211,11 @@ class Agent:
                 rows += [(wording, task, reached, stop) for reached, stop in cell]
 
         # TensorBoard gets totals; per-cell detail (early, late, ...) is in the printout above.
-        def log(name, picked):
+        groups = [("all", rows), ("heldout_wording", [r for r in rows if r[0] == "heldout"])]
+        groups += [(task.replace(" ", "_"), [r for r in rows if r[1] == task]) for task in EVAL_TASKS]
+        for name, picked in groups:
             summary_writer.add_scalar(f"eval_success/{name}", np.mean([r[2] for r in picked]), epoch)
             summary_writer.add_scalar(f"eval_stop/{name}", np.mean([r[3] == "on_time" for r in picked]), epoch)
-        log("all", rows)
-        log("heldout_wording", [r for r in rows if r[0] == "heldout"])
-        for task in EVAL_TASKS:
-            log(task.replace(" ", "_"), [r for r in rows if r[1] == task])
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
@@ -236,22 +240,12 @@ class Agent:
         env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
         return ArmHomeWrapper(env)
 
-    def run_command(self, env, obs, prompt, slowdown=1.0):
+    def run_command(self, env, obs, prompt):
         """Act until the done rule fires or time runs out, then go home.
 
         Returns (obs, done fired, tasks complete when the policy stopped, tasks complete after homing)."""
         self.reset_policy()
         self.vlm.model.eval()
-        last_step = time.time()
-
-        def step(action):
-            nonlocal obs, last_step
-            obs, _, _, _, step_info = env.step(action)
-            # Sleep for (slowdown - 1) times what the step took, so slowdown=2 runs at half speed.
-            time.sleep((slowdown - 1) * (time.time() - last_step))
-            last_step = time.time()
-            return step_info
-
         fired = False
         info = {"step_task_completions": []}
         for _ in range(self.max_episode_steps):
@@ -259,16 +253,16 @@ class Agent:
             if self.stopping():
                 fired = True
                 break
-            info = step(action)
+            obs, _, _, _, info = env.step(action)
         at_stop = info["step_task_completions"]
 
         for action in itertools.islice(env.home_actions(), env.max_steps):
-            step(action)
+            obs, _, _, _, info = env.step(action)
         worst = np.abs(env.home - env.unwrapped.data.qpos[:9]).max()
         if worst >= env.tolerance:
             print(f"Homing gave up after {env.max_steps} steps, worst joint still {worst:.3f} rad off", flush=True)
 
-        info = step(np.zeros(env.action_space.shape[0]))
+        obs, _, _, _, info = env.step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
         return obs, fired, at_stop, info["step_task_completions"]
 
