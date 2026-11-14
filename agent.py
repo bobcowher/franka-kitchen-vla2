@@ -29,8 +29,8 @@ from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-# How a rollout ended under the stop rule, judged when the policy stopped; success is correct or miss.
-OUTCOMES = ("correct", "false_stop", "miss", "quiet_fail")
+# When the stop fired relative to the first reward step: within done_window, before any reward, after, or not at all.
+DONE_OUTCOMES = ("on_time", "early", "late", "never")
 
 
 def git_label():
@@ -59,6 +59,7 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
+                 done_window=30,
                  done_learning_rate=3e-4):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
@@ -74,6 +75,7 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -195,14 +197,14 @@ class Agent:
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
                 results = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
-                outcomes = [outcome for outcome, _ in results]
-                counts = {o: outcomes.count(o) for o in OUTCOMES}
-                counts["undone_by_homing"] = sum(undone for _, undone in results)
+                counts = {"success": sum(r["success"] for r in results)}
+                counts.update({o: sum(r["done"] == o for r in results) for o in DONE_OUTCOMES})
+                counts["held"] = sum(r["held"] for r in results)
                 tag = f"eval_{wording}/{task.replace(' ', '_')}"
-                summary_writer.add_scalar(f"{tag}/success", (counts["correct"] + counts["miss"]) / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/false_stop", counts["false_stop"] / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/undone_by_homing", counts["undone_by_homing"] / rollouts, epoch)
-                print(f"  eval {wording} {task}: {counts}", flush=True)
+                for name, count in counts.items():
+                    summary_writer.add_scalar(f"{tag}/{name}", count / rollouts, epoch)
+                gaps = sorted(r["gap"] for r in results if r["gap"] is not None)
+                print(f"  eval {wording} {task}: {counts} stop gaps {gaps}", flush=True)
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
@@ -227,7 +229,7 @@ class Agent:
     def run_command(self, env, obs, prompt, slowdown=1.0):
         """Act until the done rule fires or time runs out, then go home.
 
-        Returns (obs, done fired, tasks complete when the policy stopped, tasks complete after homing)."""
+        Returns (obs, steps taken when the stop fired or None, {task: first step it was complete}, tasks complete after homing)."""
         self.reset_policy()
         self.vlm.model.eval()
         last_step = time.time()
@@ -240,16 +242,16 @@ class Agent:
             last_step = time.time()
             return step_info
 
-        fired = False
-        info = {"step_task_completions": []}
-        for _ in range(self.max_episode_steps):
+        stop_step = None
+        first_complete = {}
+        for t in range(self.max_episode_steps):
             images, joint_pos = self.process_observation(obs)
             action = self.get_action(images, prompt, joint_pos)
             if self.done_streak >= self.done_patience:
-                fired = True
+                stop_step = t
                 break
-            info = step(action)
-        at_stop = info["step_task_completions"]
+            for task in step(action)["step_task_completions"]:
+                first_complete.setdefault(task, t + 1)
 
         for _ in range(env.max_steps):
             action = env.home_action()
@@ -262,15 +264,24 @@ class Agent:
 
         info = step(np.zeros(env.action_space.shape[0]))
         self.vlm.model.train()
-        return obs, fired, at_stop, info["step_task_completions"]
+        return obs, stop_step, first_complete, info["step_task_completions"]
 
     def test(self, task, prompt=None, render_mode="rgb_array", slowdown=1.0):
-        """One fresh-scene rollout run as play.py runs a command; returns (one of OUTCOMES, undone by homing)."""
+        """One fresh-scene rollout run as play.py runs a command, scored from env rewards only.
+
+        success: the task completed at any step before the stop. done: one of DONE_OUTCOMES.
+        gap: steps from first completion to the stop. held: still complete after homing."""
         env = ArmHomeWrapper(self._make_env(task, render_mode, terminate_on_tasks_completed=False,
                                             remove_task_when_completed=False))
         obs, _ = env.reset()
-        _, fired, at_stop, after_home = self.run_command(env, obs, prompt or TASKS[task], slowdown)
+        _, stop_step, first_complete, after_home = self.run_command(env, obs, prompt or TASKS[task], slowdown)
         env.close()
-        done = task in at_stop
-        outcome = ("correct" if done else "false_stop") if fired else ("miss" if done else "quiet_fail")
-        return outcome, done and task not in after_home
+        first = first_complete.get(task)
+        gap = None if stop_step is None or first is None else stop_step - first
+        if stop_step is None:
+            done = "never"
+        elif first is None:
+            done = "early"
+        else:
+            done = "on_time" if gap <= self.done_window else "late"
+        return {"success": first is not None, "done": done, "gap": gap, "held": task in after_home}
