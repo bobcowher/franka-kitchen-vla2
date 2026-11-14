@@ -13,7 +13,7 @@ STRATEGY=bandwidth only times the card-to-card transfers FSDP makes.
 
 LORA=16 swaps full fine-tuning for rank-16 adapters on a frozen bf16 backbone.
 
-Other knobs (env vars): SINGLE_GPU picks the card for single, MICRO pieces per step, CUT the split layer, MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
+Other knobs (env vars): SINGLE_GPU picks the card for single, MICRO pieces per step, CUT the split layer, MODEL=500M|2.2B|8B, STEPS, BATCH (per card), SHARDS (dataset shards to load),
 DATA (shard directory), CHECKPOINT=1 for activation checkpointing, OFFLOAD=1 to keep fsdp's weights and Adam state in CPU RAM.
 Prints step time, throughput and peak memory per card, or which card ran out.
 """
@@ -43,6 +43,7 @@ from vlm import JOINT_MAX, JOINT_MIN, RobotControlOutputHead
 MODELS = {
     "500M": ("HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "7b375e1b73b11138ff12fe22c8f2822d8fe03467", 960),
     "2.2B": ("HuggingFaceTB/SmolVLM2-2.2B-Instruct", "be92141c8d0ceb98596a923c308ac2bbb4a7c466", 2048),
+    "8B": ("HuggingFaceM4/Idefics3-8B-Llama3", "fddb4ff79181e55a994674777e06cd5456ce3dc3", 4096),  # SmolVLM's parent
 }
 
 
