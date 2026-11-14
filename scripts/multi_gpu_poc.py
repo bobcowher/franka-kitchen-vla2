@@ -8,7 +8,9 @@ Three ways to run the same model, picked with STRATEGY:
           batch (data parallel); weights are gathered layer by layer for compute. Every card
           holds the same share, so the smallest card sets the limit, and the slowest one the pace
 
-Other knobs (env vars): MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
+STRATEGY=bandwidth only times the card-to-card transfers FSDP makes.
+
+Other knobs (env vars): SINGLE_GPU picks the card for single, MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
 DATA (shard directory), CHECKPOINT=1 for activation checkpointing, OFFLOAD=1 to keep fsdp's weights and Adam state in CPU RAM.
 Prints step time, throughput and peak memory per card, or which card ran out.
 """
@@ -62,7 +64,7 @@ class PocTrainer:
 
     def __init__(self, strategy="single", model_name="2.2B", steps=30, warmup=5, batch_size=4,
                  shards=20, chunk_size=8, n_actions=9, learning_rate=1e-5, checkpointing=False,
-                 offload=False, big_gpu=1, small_gpu=0, data_path="dataset"):
+                 offload=False, big_gpu=1, small_gpu=0, single_gpu=None, data_path="dataset"):
         self.strategy = strategy
         self.model_name = model_name
         self.steps = steps
@@ -76,6 +78,7 @@ class PocTrainer:
         self.offload = offload
         self.big_gpu = big_gpu  # the 3090 under PCI_BUS_ID order
         self.small_gpu = small_gpu  # the 3060
+        self.single_gpu = big_gpu if single_gpu is None else single_gpu  # card for STRATEGY=single
         self.data_path = data_path
 
     def load_data(self):
@@ -168,7 +171,7 @@ class PocTrainer:
         return (((pred - actions) ** 2).mean(-1) * mask).sum() / mask.sum()
 
     def devices(self):
-        return sorted({self.small_gpu, self.big_gpu}) if self.strategy != "single" else [self.big_gpu]
+        return sorted({self.small_gpu, self.big_gpu}) if self.strategy != "single" else [self.single_gpu]
 
     def train(self, rank=0, world=1):
         torch.manual_seed(123)
@@ -176,7 +179,7 @@ class PocTrainer:
         dataset = self.load_data()
         model = self.build_model()
         if self.strategy == "single":
-            device = torch.device(f"cuda:{self.big_gpu}")
+            device = torch.device(f"cuda:{self.single_gpu}")
             model.to(device)
         elif self.strategy == "split":
             device = self.place_split(model)
@@ -227,6 +230,29 @@ def check_cards(trainer):
         assert "3090" in names[trainer.big_gpu] and "3060" in names[trainer.small_gpu], names
 
 
+def bandwidth_worker(rank, world, mib=256, iters=20):
+    """What FSDP pays per step: all-gather (weights for compute) and reduce-scatter (gradients) between the cards."""
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29512")
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world, device_id=torch.device(f"cuda:{rank}"))
+    full = torch.empty(mib * 2**20 // 2, dtype=torch.bfloat16, device=f"cuda:{rank}")
+    shard = torch.empty(full.numel() // world, dtype=torch.bfloat16, device=f"cuda:{rank}")
+    for name, op in (("all_gather", lambda: dist.all_gather_into_tensor(full, shard)),
+                     ("reduce_scatter", lambda: dist.reduce_scatter_tensor(shard, full))):
+        op()
+        torch.cuda.synchronize()
+        start = time.time()
+        for _ in range(iters):
+            op()
+        torch.cuda.synchronize()
+        seconds = (time.time() - start) / iters
+        # Bus bandwidth as nccl-tests reports it: each card sends (world-1)/world of the buffer.
+        if rank == 0:
+            print(f"{name} {mib} MiB: {seconds * 1000:.1f} ms, bus {mib / 1024 * (world - 1) / world / seconds:.1f} GiB/s", flush=True)
+    dist.destroy_process_group()
+
+
 def fsdp_worker(rank, world, trainer):
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "29511")
@@ -249,8 +275,12 @@ def main():
     trainer = PocTrainer(strategy=env("STRATEGY", "single"), model_name=env("MODEL", "2.2B"),
                          steps=env("STEPS", 30), batch_size=env("BATCH", 4), shards=env("SHARDS", 20),
                          checkpointing=env("CHECKPOINT", 0) == 1, offload=env("OFFLOAD", 0) == 1,
-                         big_gpu=env("BIG_GPU", 1), small_gpu=env("SMALL_GPU", 0), data_path=env("DATA", "dataset"))
+                         big_gpu=env("BIG_GPU", 1), small_gpu=env("SMALL_GPU", 0),
+                         single_gpu=env("SINGLE_GPU", -1) if "SINGLE_GPU" in os.environ else None, data_path=env("DATA", "dataset"))
     check_cards(trainer)
+    if trainer.strategy == "bandwidth":
+        mp.spawn(bandwidth_worker, args=(torch.cuda.device_count(),), nprocs=torch.cuda.device_count())
+        return
     if trainer.strategy == "fsdp":
         world = torch.cuda.device_count()
         mp.spawn(fsdp_worker, args=(world, trainer), nprocs=world)
