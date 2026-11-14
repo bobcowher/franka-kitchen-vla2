@@ -1,16 +1,17 @@
 """Proof of concept: train a VLA backbone too big for one card across lab's two GPUs.
 
-Three ways to run the same model, picked with STRATEGY:
+Ways to run the same model, picked with STRATEGY:
   single  everything on one card (the 3090), to show where one card runs out
   split   the decoder layers divided between the cards in proportion to their memory;
           one card works while the other waits, but the cards needn't match
   fsdp    one process per card, each holding a shard of every weight and running its own
           batch (data parallel); weights are gathered layer by layer for compute. Every card
           holds the same share, so the smallest card sets the limit, and the slowest one the pace
-
+  pipeline the split placement, with each step's MICRO pieces all run forward before one backward,
+          so the cards overlap: the classic GPipe schedule. Only activations cross between cards
 STRATEGY=bandwidth only times the card-to-card transfers FSDP makes.
 
-Other knobs (env vars): SINGLE_GPU picks the card for single, MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
+Other knobs (env vars): SINGLE_GPU picks the card for single, MICRO pieces per step, CUT the split layer, MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
 DATA (shard directory), CHECKPOINT=1 for activation checkpointing, OFFLOAD=1 to keep fsdp's weights and Adam state in CPU RAM.
 Prints step time, throughput and peak memory per card, or which card ran out.
 """
@@ -64,7 +65,8 @@ class PocTrainer:
 
     def __init__(self, strategy="single", model_name="2.2B", steps=30, warmup=5, batch_size=4,
                  shards=20, chunk_size=8, n_actions=9, learning_rate=1e-5, checkpointing=False,
-                 offload=False, big_gpu=1, small_gpu=0, single_gpu=None, data_path="dataset"):
+                 offload=False, big_gpu=1, small_gpu=0, single_gpu=None, micro_batches=1, cut=0,
+                 data_path="dataset"):
         self.strategy = strategy
         self.model_name = model_name
         self.steps = steps
@@ -80,6 +82,8 @@ class PocTrainer:
         self.small_gpu = small_gpu  # the 3060
         self.single_gpu = big_gpu if single_gpu is None else single_gpu  # card for STRATEGY=single
         self.data_path = data_path
+        self.micro_batches = micro_batches  # pieces of BATCH each per step: accumulated, or pipelined
+        self.cut = cut  # first decoder layer on the big card; 0 picks it by memory share
 
     def load_data(self):
         """A few shards through the normal loader: enough for real images and actions, small enough to load fast."""
@@ -124,7 +128,7 @@ class PocTrainer:
         mem_small = torch.cuda.get_device_properties(small).total_memory
         mem_big = torch.cuda.get_device_properties(big).total_memory
         # One layer fewer on the small card: it also holds the embedding table and vision tower.
-        cut = max(1, round(len(layers) * mem_small / (mem_small + mem_big)) - 1)
+        cut = self.cut or max(1, round(len(layers) * mem_small / (mem_small + mem_big)) - 1)
         model.to(small)
         for module in [*layers[cut:], model.model.text_model.norm, model.lm_head]:
             module.to(big)
@@ -181,7 +185,7 @@ class PocTrainer:
         if self.strategy == "single":
             device = torch.device(f"cuda:{self.single_gpu}")
             model.to(device)
-        elif self.strategy == "split":
+        elif self.strategy in ("split", "pipeline"):
             device = self.place_split(model)
         else:
             device = self.place_fsdp(model, rank)
@@ -189,12 +193,22 @@ class PocTrainer:
         for d in self.devices():
             torch.cuda.reset_peak_memory_stats(d)
 
-        times, losses = [], []
+        times, losses, prep = [], [], []
         for step in range(self.steps):
             start = time.time()
-            inputs, actions, mask = self.batch(dataset, device)
-            loss = self.loss(model, inputs, actions, mask)
-            loss.backward()
+            batches = [self.batch(dataset, device) for _ in range(self.micro_batches)]
+            prep.append(time.time() - start)
+            if self.strategy == "pipeline":
+                # Every forward is queued before any backward, so the big card works on piece i while the small one starts i+1.
+                loss = sum(self.loss(model, *b) for b in batches) / self.micro_batches
+                loss.backward()
+            else:
+                # Gradient accumulation: each piece runs forward and backward before the next starts.
+                loss = 0.0
+                for b in batches:
+                    piece = self.loss(model, *b) / self.micro_batches
+                    piece.backward()
+                    loss += piece.detach()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             for d in self.devices():
@@ -204,6 +218,7 @@ class PocTrainer:
             losses.append(loss.item())
             if rank == 0 and step % 5 == 0:
                 print(f"step {step} loss {loss.item():.4f} {time.time() - start:.2f}s", flush=True)
+        self.prep_time = float(np.mean(prep[self.warmup:]))
         return times, losses
 
     def peak_memory(self, devices):
@@ -215,8 +230,12 @@ class PocTrainer:
         print("=" * 60)
         print(f"RESULT strategy={self.strategy} model={self.model_name} batch/card={self.batch_size} "
               f"checkpointing={self.checkpointing} offload={self.offload}")
-        print(f"  step {step:.2f}s, {self.batch_size * world / step:.1f} samples/s, "
+        print(f"  step {step:.2f}s for {self.batch_size * self.micro_batches * world} samples, "
+              f"{self.batch_size * self.micro_batches * world / step:.1f} samples/s, "
               f"loss {losses[0]:.4f} -> {np.mean(losses[-5:]):.4f}")
+        gpu = step - self.prep_time
+        print(f"  GPU part (step minus {self.prep_time:.2f}s CPU batch prep): {gpu:.2f}s, "
+              f"{self.batch_size * self.micro_batches * world / gpu:.1f} samples/s")
         for d, (name, peak, total) in sorted(peaks.items()):
             print(f"  cuda:{d} {name}: peak {peak:.1f} of {total:.1f} GiB")
         print("=" * 60, flush=True)
@@ -276,7 +295,8 @@ def main():
                          steps=env("STEPS", 30), batch_size=env("BATCH", 4), shards=env("SHARDS", 20),
                          checkpointing=env("CHECKPOINT", 0) == 1, offload=env("OFFLOAD", 0) == 1,
                          big_gpu=env("BIG_GPU", 1), small_gpu=env("SMALL_GPU", 0),
-                         single_gpu=env("SINGLE_GPU", -1) if "SINGLE_GPU" in os.environ else None, data_path=env("DATA", "dataset"))
+                         single_gpu=env("SINGLE_GPU", -1) if "SINGLE_GPU" in os.environ else None,
+                         micro_batches=env("MICRO", 1), cut=env("CUT", 0), data_path=env("DATA", "dataset"))
     check_cards(trainer)
     if trainer.strategy == "bandwidth":
         mp.spawn(bandwidth_worker, args=(torch.cuda.device_count(),), nprocs=torch.cuda.device_count())
