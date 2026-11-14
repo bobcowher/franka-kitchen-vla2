@@ -1,16 +1,26 @@
-transformers
+transformers==5.23.0
 # The SmolVLM processor needs these two, though nothing here imports them.
-num2words
-torchvision
-pillow
+num2words==0.5.14
+torchvision==0.29.2
+pillow==13.0.0
 
 # These three determine compatibility with each other and with the Python
 # version -- gymnasium-robotics constrains mujoco tightly. Verified working
-# together on Python 3.12. Everything below floats.
+# together on Python 3.12.
 mujoco==3.11.0
 gymnasium==1.3.0
 gymnasium-robotics==1.4.2
 
-tensorboard
-torch
-torchinfo
+tensorboard==2.21.0
+torch==2.15.0
+# transformers imports it when present, and it must match torch's CUDA build.
+torchaudio==2.11.1
+torchinfo==1.8.0
+
+# Pulled in by the above, pinned because they shape what the model sees: an
+# unpinned desktop scored a 2.2B checkpoint 0/40 on microwave where lab scored 20.
+numpy==1.26.4
+tokenizers==0.23.3
+huggingface_hub==2.4.0
+safetensors==0.8.0
+accelerate==1.15.0
