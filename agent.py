@@ -61,9 +61,9 @@ class Agent:
                  done_threshold=0.5,
                  done_patience=2,
                  done_learning_rate=3e-4,
-                 vlm_config=SMOLVLM2_CONFIG_500M,
+                 vlm_config=SMOLVLM2_CONFIG_2_2B,
                  lora_rank=16,
-                 micro_batch_size=None):
+                 micro_batch_size=16):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
