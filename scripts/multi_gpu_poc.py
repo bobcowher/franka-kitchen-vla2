@@ -11,11 +11,14 @@ Ways to run the same model, picked with STRATEGY:
           so the cards overlap: the classic GPipe schedule. Only activations cross between cards
 STRATEGY=bandwidth only times the card-to-card transfers FSDP makes.
 
+LORA=16 swaps full fine-tuning for rank-16 adapters on a frozen bf16 backbone.
+
 Other knobs (env vars): SINGLE_GPU picks the card for single, MICRO pieces per step, CUT the split layer, MODEL=2.2B|500M, STEPS, BATCH (per card), SHARDS (dataset shards to load),
 DATA (shard directory), CHECKPOINT=1 for activation checkpointing, OFFLOAD=1 to keep fsdp's weights and Adam state in CPU RAM.
 Prints step time, throughput and peak memory per card, or which card ran out.
 """
 import glob
+import math
 import os
 import sys
 import tempfile
@@ -29,6 +32,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import torch.nn as nn
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 import frames
@@ -44,6 +48,31 @@ MODELS = {
 
 def env(name, default):
     return type(default)(os.environ.get(name, default))
+
+
+class LoRALinear(nn.Module):
+    """A frozen linear layer plus a trainable low-rank update: W x + (alpha/r) B A x, with B starting at zero."""
+
+    def __init__(self, base, rank, alpha):
+        super().__init__()
+        self.base = base
+        self.scale = alpha / rank
+        self.down = nn.Linear(base.in_features, rank, bias=False)  # fp32, so Adam's small updates survive
+        self.up = nn.Linear(rank, base.out_features, bias=False)
+        nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.up.weight)  # starts as exactly the pretrained layer
+
+    def forward(self, x):
+        return self.base(x) + self.up(self.down(x)) * self.scale
+
+
+def add_lora(text_model, rank, alpha):
+    """Adapters on every attention and MLP projection; everything else in the text model stays frozen bf16."""
+    for layer in text_model.layers:
+        for parent, names in ((layer.self_attn, ("q_proj", "k_proj", "v_proj", "o_proj")),
+                              (layer.mlp, ("gate_proj", "up_proj", "down_proj"))):
+            for name in names:
+                setattr(parent, name, LoRALinear(getattr(parent, name), rank, alpha))
 
 
 def move_inputs_hook(module, args, kwargs):
@@ -66,7 +95,7 @@ class PocTrainer:
     def __init__(self, strategy="single", model_name="2.2B", steps=30, warmup=5, batch_size=4,
                  shards=20, chunk_size=8, n_actions=9, learning_rate=1e-5, checkpointing=False,
                  offload=False, big_gpu=1, small_gpu=0, single_gpu=None, micro_batches=1, cut=0,
-                 data_path="dataset"):
+                 lora_rank=0, lora_alpha=32, data_path="dataset"):
         self.strategy = strategy
         self.model_name = model_name
         self.steps = steps
@@ -84,6 +113,8 @@ class PocTrainer:
         self.data_path = data_path
         self.micro_batches = micro_batches  # pieces of BATCH each per step: accumulated, or pipelined
         self.cut = cut  # first decoder layer on the big card; 0 picks it by memory share
+        self.lora_rank = lora_rank  # 0 trains the decoder layers in full; >0 freezes them in bf16 and trains adapters
+        self.lora_alpha = lora_alpha
 
     def load_data(self):
         """A few shards through the normal loader: enough for real images and actions, small enough to load fast."""
@@ -106,11 +137,14 @@ class PocTrainer:
         for p in model.parameters():
             p.requires_grad = False
         text = model.model.text_model
-        text.float()
-        for p in text.parameters():
-            p.requires_grad = True
-        # Embeddings stay frozen bf16: image features are spliced into them in place, so the dtypes must match.
-        text.embed_tokens.to(torch.bfloat16).requires_grad_(False)
+        if self.lora_rank:
+            add_lora(text, self.lora_rank, self.lora_alpha)
+        else:
+            text.float()
+            for p in text.parameters():
+                p.requires_grad = True
+            # Embeddings stay frozen bf16: image features are spliced into them in place, so the dtypes must match.
+            text.embed_tokens.to(torch.bfloat16).requires_grad_(False)
         model.lm_head = RobotControlOutputHead(vla_output_dim=emb_dim, n_actions=self.n_actions * self.chunk_size)
         if self.checkpointing:
             model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -118,7 +152,8 @@ class PocTrainer:
         model.train()  # from_pretrained returns eval mode, and HF only checkpoints in training mode
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
-        print(f"{self.model_name}: {total / 1e9:.2f}B params, {trainable / 1e9:.2f}B trainable "
+        print(f"{self.model_name}{f' LoRA r{self.lora_rank}' if self.lora_rank else ''}: "
+              f"{total / 1e9:.2f}B params, {trainable / 1e9:.3f}B trainable "
               f"(~{trainable * 16 / 1e9:.0f} GB for fp32 weights, grads and Adam state)", flush=True)
         return model
 
@@ -297,7 +332,7 @@ def main():
                          checkpointing=env("CHECKPOINT", 0) == 1, offload=env("OFFLOAD", 0) == 1,
                          big_gpu=env("BIG_GPU", 1), small_gpu=env("SMALL_GPU", 0),
                          single_gpu=env("SINGLE_GPU", -1) if "SINGLE_GPU" in os.environ else None,
-                         micro_batches=env("MICRO", 1), cut=env("CUT", 0), data_path=env("DATA", "dataset"))
+                         micro_batches=env("MICRO", 1), cut=env("CUT", 0), lora_rank=env("LORA", 0), data_path=env("DATA", "dataset"))
     check_cards(trainer)
     if trainer.strategy == "bandwidth":
         mp.spawn(bandwidth_worker, args=(torch.cuda.device_count(),), nprocs=torch.cuda.device_count())
