@@ -166,9 +166,12 @@ class PocTrainer:
         mem_big = torch.cuda.get_device_properties(big).total_memory
         # One layer fewer on the small card: it also holds the embedding table and vision tower.
         cut = self.cut or max(1, round(len(layers) * mem_small / (mem_small + mem_big)) - 1)
-        model.to(small)
-        for module in [*layers[cut:], model.model.text_model.norm, model.lm_head]:
-            module.to(big)
+        text = model.model.text_model
+        # Big card first: the whole model must never land on the small one, which an 8B can't fit.
+        model.to(big)
+        for module in [model.model.vision_model, model.model.connector, text.embed_tokens, text.rotary_emb, *layers[:cut]]:
+            module.to(small)
+        for module in [*layers, text.norm, model.lm_head]:
             module.register_forward_pre_hook(move_inputs_hook, with_kwargs=True)
         print(f"split: layers 0-{cut - 1} + vision + embeddings on cuda:{self.small_gpu}, "
               f"layers {cut}-{len(layers) - 1} + head on cuda:{self.big_gpu}", flush=True)
