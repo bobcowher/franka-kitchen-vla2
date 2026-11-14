@@ -218,13 +218,18 @@ class Agent:
         self.action_queue = []
         self.done_streak = 0
 
-    def get_action(self, images, prompt, joint_pos):
+    def get_action(self, obs, prompt):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
+            images, joint_pos = self.process_observation(obs)
             chunks, done_prob = self.vlm.predict(images, [prompt], joint_pos)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
             self.done_streak = self.done_streak + 1 if done_prob.item() >= self.done_threshold else 0
         return self.action_queue.pop(0)
+
+    def stopping(self):
+        """The done rule: done_prob at or above done_threshold on done_patience replans in a row."""
+        return self.done_streak >= self.done_patience
 
     def make_session_env(self, render_mode="human"):
         """An env for many commands in a row: it never ends on success and tracks every task."""
@@ -250,9 +255,8 @@ class Agent:
         fired = False
         info = {"step_task_completions": []}
         for _ in range(self.max_episode_steps):
-            images, joint_pos = self.process_observation(obs)
-            action = self.get_action(images, prompt, joint_pos)
-            if self.done_streak >= self.done_patience:
+            action = self.get_action(obs, prompt)
+            if self.stopping():
                 fired = True
                 break
             info = step(action)
@@ -282,27 +286,21 @@ class Agent:
         self.reset_policy()
         self.vlm.model.eval()
         reward_at = stop_at = None  # both in env steps taken: stop_at before this step's action, reward_at after it
-
-        def act(t):
-            """The policy's next action; notes the step of its first stop."""
-            nonlocal stop_at
-            images, joint_pos = self.process_observation(obs)
-            action = self.get_action(images, prompt, joint_pos)
-            if stop_at is None and self.done_streak >= self.done_patience:
-                stop_at = t
-            return action
-
         # Until the first reward or the step limit. A stop here is early, or false if no reward follows.
         for t in range(self.max_episode_steps):
-            obs, _, _, _, info = env.step(act(t))
+            action = self.get_action(obs, prompt)
+            if stop_at is None and self.stopping():
+                stop_at = t
+            obs, _, _, _, info = env.step(action)
             if task in info["step_task_completions"]:
                 reward_at = t + 1
                 break
         # After the reward, done_window steps for the policy to stop.
-        if reward_at is not None:
+        if reward_at is not None and stop_at is None:
             for t in range(reward_at, reward_at + self.done_window):
-                action = act(t)
-                if stop_at is not None:
+                action = self.get_action(obs, prompt)
+                if self.stopping():
+                    stop_at = t
                     break
                 obs, _, _, _, info = env.step(action)
         env.close()
