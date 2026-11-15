@@ -29,8 +29,17 @@ from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-# When the policy first stopped: within done_window of the first reward, before it, not by the window's end, or (no reward) at all or never.
-STOPS = ("on_time", "early", "late", "false_stop", "none")
+# How a rollout's first stop went. Deployment succeeds on on_time and late: the task was complete when the policy stopped.
+STOPS = (
+    "on_time",     # complete at the stop, within done_window steps of the first reward
+    "late",        # complete at the stop, but later than that
+    "undone",      # stopped after the task completed, by which time it no longer was
+    "early",       # stopped before the task completed; it completed afterwards
+    "never",       # completed, never stopped
+    "false_stop",  # stopped, never completed
+    "none",        # never completed, never stopped
+)
+DEPLOYED_SUCCESS = ("on_time", "late")
 
 
 def git(*args):
@@ -215,7 +224,7 @@ class Agent:
         groups += [(task.replace(" ", "_"), [r for r in rows if r[1] == task]) for task in EVAL_TASKS]
         for name, picked in groups:
             summary_writer.add_scalar(f"eval_success/{name}", np.mean([r[2] for r in picked]), epoch)
-            summary_writer.add_scalar(f"eval_stop/{name}", np.mean([r[3] == "on_time" for r in picked]), epoch)
+            summary_writer.add_scalar(f"eval_stop/{name}", np.mean([r[3] in DEPLOYED_SUCCESS for r in picked]), epoch)
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
@@ -240,67 +249,60 @@ class Agent:
         env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
         return ArmHomeWrapper(env)
 
+    def rollout(self, env, obs, prompt, watch=None):
+        """Runs the policy from obs, the one loop both play.py and the eval use.
+
+        watch=None ends at the first stop, as a deployed robot would. watch=task keeps
+        going past an early stop until that task completes, so the eval also learns
+        whether the arm would have finished; every step up to the stop is the same.
+        Returns (obs, step of the first stop or None, tasks complete at the stop or
+        at the end, {task: step it first completed}). Steps count env steps taken."""
+        self.reset_policy()
+        self.vlm.model.eval()
+        stop_at, at_stop, first_done = None, None, {}
+        completions = []  # tasks complete after the last step taken
+        for t in range(self.max_episode_steps):
+            action = self.get_action(obs, prompt)
+            if stop_at is None and self.stopping():
+                stop_at, at_stop = t, completions
+            if stop_at is not None and (watch is None or watch in first_done):
+                break
+            obs, _, _, _, info = env.step(action)
+            completions = info["step_task_completions"]
+            for task in completions:
+                first_done.setdefault(task, t + 1)
+        self.vlm.model.train()
+        return obs, stop_at, completions if at_stop is None else at_stop, first_done
+
     def run_command(self, env, obs, prompt):
         """Act until the done rule fires or time runs out, then go home.
 
         Returns (obs, done fired, tasks complete when the policy stopped, tasks complete after homing)."""
-        self.reset_policy()
-        self.vlm.model.eval()
-        fired = False
-        info = {"step_task_completions": []}
-        for _ in range(self.max_episode_steps):
-            action = self.get_action(obs, prompt)
-            if self.stopping():
-                fired = True
-                break
-            obs, _, _, _, info = env.step(action)
-        at_stop = info["step_task_completions"]
-
+        obs, stop_at, at_stop, _ = self.rollout(env, obs, prompt)
         for action in itertools.islice(env.home_actions(), env.max_steps):
             obs, _, _, _, info = env.step(action)
         worst = np.abs(env.home - env.unwrapped.data.qpos[:9]).max()
         if worst >= env.tolerance:
             print(f"Homing gave up after {env.max_steps} steps, worst joint still {worst:.3f} rad off", flush=True)
-
         obs, _, _, _, info = env.step(np.zeros(env.action_space.shape[0]))
-        self.vlm.model.train()
-        return obs, fired, at_stop, info["step_task_completions"]
+        return obs, stop_at is not None, at_stop, info["step_task_completions"]
 
     def test(self, task, prompt=None, render_mode="rgb_array"):
-        """One fresh-scene rollout scored two ways; returns (reached, one of STOPS).
+        """One fresh-scene rollout in play.py's env and loop; returns (reached, one of STOPS).
 
-        reached: the task gave a reward at any step. The stop is judged on its own:
-        a stop does not end the rollout, so an early stop can't hide a reach.
-        It runs until done_window steps after the first reward, or the step limit
-        if the task is never reached. There is no homing; it has its own test."""
-        env = self._make_env(task, render_mode, max_episode_steps=self.max_episode_steps + self.done_window,
-                             terminate_on_tasks_completed=False, remove_task_when_completed=False)
+        reached: the task completed at some step, whether or not the policy had already
+        stopped. No homing: it comes after the stop, and has its own paired test."""
+        env = self.make_session_env(render_mode)
         obs, _ = env.reset()
-        prompt = prompt or TASKS[task]
-        self.reset_policy()
-        self.vlm.model.eval()
-        reward_at = stop_at = None  # both in env steps taken: stop_at before this step's action, reward_at after it
-        # Until the first reward or the step limit. A stop here is early, or false if no reward follows.
-        for t in range(self.max_episode_steps):
-            action = self.get_action(obs, prompt)
-            if stop_at is None and self.stopping():
-                stop_at = t
-            obs, _, _, _, info = env.step(action)
-            if task in info["step_task_completions"]:
-                reward_at = t + 1
-                break
-        # After the reward, done_window steps for the policy to stop.
-        if reward_at is not None and stop_at is None:
-            for t in range(reward_at, reward_at + self.done_window):
-                action = self.get_action(obs, prompt)
-                if self.stopping():
-                    stop_at = t
-                    break
-                obs, _, _, _, info = env.step(action)
+        _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or TASKS[task], watch=task)
         env.close()
-        self.vlm.model.train()
-        if reward_at is None:
-            return False, "none" if stop_at is None else "false_stop"
+        reached_at = first_done.get(task)
         if stop_at is None:
-            return True, "late"
-        return True, "early" if stop_at < reward_at else "on_time"
+            return reached_at is not None, "none" if reached_at is None else "never"
+        if reached_at is None:
+            return False, "false_stop"
+        if stop_at < reached_at:
+            return True, "early"
+        if task not in at_stop:
+            return True, "undone"
+        return True, "on_time" if stop_at - reached_at < self.done_window else "late"
