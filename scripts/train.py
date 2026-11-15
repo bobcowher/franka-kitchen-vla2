@@ -8,5 +8,5 @@ from agent import Agent
 
 agent = Agent()
 
-agent.train(epochs=5000, batch_size=64)
+agent.train(epochs=10000, batch_size=64)
 
