@@ -1,7 +1,28 @@
+import time
 import mujoco
 import numpy as np
 from gymnasium import ObservationWrapper, Wrapper, spaces
 import frames
+
+
+class RealTimeWrapper(Wrapper):
+    """Holds each step to the sim time it covers, so a human-mode window shows the arm at real speed.
+
+    MuJoCo's viewer doesn't pace itself (its timing also ignores frame_skip), so
+    without this the arm moves as fast as the policy and the drawing allow. A
+    step that already took longer, e.g. one where the model ran, isn't padded.
+    """
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.dt = env.unwrapped.robot_env.dt  # 40 physics steps of 0.002 s
+        self.last_step = time.perf_counter()
+
+    def step(self, action):
+        result = self.env.step(action)
+        time.sleep(max(0.0, self.last_step + self.dt - time.perf_counter()))
+        self.last_step = time.perf_counter()
+        return result
 
 
 class HeldSetpointWrapper(Wrapper):

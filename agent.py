@@ -11,13 +11,12 @@ import torch
 import torch.nn.functional as F
 import itertools
 import math
-import time
 import datetime
 import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, VLAObservationWrapper
+from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, RealTimeWrapper, VLAObservationWrapper
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -30,14 +29,26 @@ from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 from config import SMOLVLM2_CONFIG_500M
 
 EVAL_TASKS = ["microwave", "hinge cabinet", "top burner"]
-# How a rollout ended under the stop rule, judged when the policy stopped; success is correct or miss.
-OUTCOMES = ("correct", "false_stop", "miss", "quiet_fail")
+# How a rollout's first stop went. Deployment succeeds on on_time and late: the task was complete when the policy stopped.
+STOPS = (
+    "on_time",     # complete at the stop, within done_window steps of the first reward
+    "late",        # complete at the stop, but later than that
+    "undone",      # stopped after the task completed, by which time it no longer was
+    "early",       # stopped before the task completed; it completed afterwards
+    "never",       # completed, never stopped
+    "false_stop",  # stopped, never completed
+    "none",        # never completed, never stopped
+)
+DEPLOYED_SUCCESS = ("on_time", "late")
+
+
+def git(*args):
+    """A git command's stdout, or "" if git fails."""
+    return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
 
 
 def git_label():
     """branch_shorthash for run names; the hash pins the exact code even if the branch name is off."""
-    def git(*args):
-        return subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
     return f"{git('branch', '--show-current') or 'detached'}_{git('rev-parse', '--short', 'HEAD') or 'nogit'}"
 
 
@@ -60,6 +71,7 @@ class Agent:
                  final_eval_rollouts=20,
                  done_threshold=0.5,
                  done_patience=2,
+                 done_window=20,
                  done_learning_rate=3e-4):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
@@ -75,6 +87,7 @@ class Agent:
         # Stop once done_prob reaches done_threshold on done_patience replans in a row.
         self.done_threshold = done_threshold
         self.done_patience = done_patience
+        self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -109,6 +122,8 @@ class Agent:
         tasks = task if isinstance(task, list) else [task]
         env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps or self.max_episode_steps,
                        tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
+        if render_mode == "human":
+            env = RealTimeWrapper(env)
         env = HeldSetpointWrapper(env)
         return VLAObservationWrapper(env, image_size=self.image_size)
 
@@ -131,15 +146,10 @@ class Agent:
         summary_writer_name = summary_writer_name + f"_bs={batch_size}"
         summary_writer = SummaryWriter(summary_writer_name)
 
-        def lr_factor(epoch):
-            if epoch < self.warmup_steps:
-                return (epoch + 1) / self.warmup_steps
-            progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
-            return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
         print(f"{self.dataset.terminal_memory[:self.dataset.mem_ctr].sum()} done frames of {self.dataset.mem_ctr}", flush=True)
 
         for epoch in range(epochs):
-            lr = self.learning_rate * lr_factor(epoch)
+            lr = self.learning_rate * self._lr_factor(epoch, epochs)
             self.optimizer.param_groups[0]["lr"] = lr
 
             states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
@@ -166,11 +176,11 @@ class Agent:
             done_loss = done_loss.item()
 
             if(epoch % 10 == 0):
-                summary_writer.add_scalar("done/loss", done_loss, epoch)
-                summary_writer.add_scalar("train/loss", loss, epoch)
-                summary_writer.add_scalar("train/arm", arm_loss, epoch)
-                summary_writer.add_scalar("train/gripper", gripper_loss, epoch)
-                summary_writer.add_scalar("train/lr", lr, epoch)
+                summary_writer.add_scalar("loss/action", loss, epoch)  # what the policy minimizes: arm + gripper_weight * gripper
+                summary_writer.add_scalar("loss/arm_joints", arm_loss, epoch)
+                summary_writer.add_scalar("loss/gripper", gripper_loss, epoch)
+                summary_writer.add_scalar("loss/done", done_loss, epoch)
+                summary_writer.add_scalar("optim/lr", lr, epoch)
 
             if(epoch % 100 == 0):
                 print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f}", flush=True)
@@ -181,6 +191,13 @@ class Agent:
 
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
+
+    def _lr_factor(self, epoch, epochs):
+        """Linear warmup over warmup_steps, then cosine decay to min_lr_fraction by the last epoch."""
+        if epoch < self.warmup_steps:
+            return (epoch + 1) / self.warmup_steps
+        progress = (epoch - self.warmup_steps) / max(1, epochs - self.warmup_steps)
+        return self.min_lr_fraction + (1 - self.min_lr_fraction) * 0.5 * (1 + math.cos(math.pi * progress))
 
     def _done_loss(self, logits, batch_rows):
         """BCE on the demo's done label, with done frames weighted to count as much as all the others together."""
@@ -193,82 +210,99 @@ class Agent:
         # Kept per eval so a good point in training can't be overwritten by later saves.
         self.vlm.save_the_model(f"checkpoints/smolvlm2-step{epoch}.pth")
         rollouts = rollouts or self.eval_rollouts
+        rows = []  # (wording, task, reached, stop), one per rollout
         for wording, phrases in (("train", TASK_PHRASES), ("heldout", HELDOUT_PHRASES)):
             for task in EVAL_TASKS:
-                results = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
-                outcomes = [outcome for outcome, _ in results]
-                counts = {o: outcomes.count(o) for o in OUTCOMES}
-                counts["undone_by_homing"] = sum(undone for _, undone in results)
-                tag = f"eval_{wording}/{task.replace(' ', '_')}"
-                summary_writer.add_scalar(f"{tag}/success", (counts["correct"] + counts["miss"]) / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/false_stop", counts["false_stop"] / rollouts, epoch)
-                summary_writer.add_scalar(f"{tag}/undone_by_homing", counts["undone_by_homing"] / rollouts, epoch)
+                cell = [self.test(task, phrases[task][i % len(phrases[task])]) for i in range(rollouts)]
+                counts = {"reached": sum(reached for reached, _ in cell)}
+                counts.update({s: sum(stop == s for _, stop in cell) for s in STOPS})
                 print(f"  eval {wording} {task}: {counts}", flush=True)
+                rows += [(wording, task, reached, stop) for reached, stop in cell]
+
+        # TensorBoard gets totals; per-cell detail (early, late, ...) is in the printout above.
+        groups = [("all", rows), ("heldout_wording", [r for r in rows if r[0] == "heldout"])]
+        groups += [(task.replace(" ", "_"), [r for r in rows if r[1] == task]) for task in EVAL_TASKS]
+        for name, picked in groups:
+            summary_writer.add_scalar(f"eval_success/{name}", np.mean([r[2] for r in picked]), epoch)
+            summary_writer.add_scalar(f"eval_stop/{name}", np.mean([r[3] in DEPLOYED_SUCCESS for r in picked]), epoch)
 
     def reset_policy(self):
         """Forget any queued actions; call at the start of every episode."""
         self.action_queue = []
-        self.done_prob = 0.0
         self.done_streak = 0
 
-    def get_action(self, images, prompt, joint_pos):
+    def get_action(self, obs, prompt):
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
+            images, joint_pos = self.process_observation(obs)
             chunks, done_prob = self.vlm.predict(images, [prompt], joint_pos)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
-            self.done_prob = done_prob.item()
-            self.done_streak = self.done_streak + 1 if self.done_prob >= self.done_threshold else 0
+            self.done_streak = self.done_streak + 1 if done_prob.item() >= self.done_threshold else 0
         return self.action_queue.pop(0)
+
+    def stopping(self):
+        """The done rule: done_prob at or above done_threshold on done_patience replans in a row."""
+        return self.done_streak >= self.done_patience
 
     def make_session_env(self, render_mode="human"):
         """An env for many commands in a row: it never ends on success and tracks every task."""
         env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
         return ArmHomeWrapper(env)
 
-    def run_command(self, env, obs, prompt, slowdown=1.0):
+    def rollout(self, env, obs, prompt, watch=None):
+        """Runs the policy from obs, the one loop both play.py and the eval use.
+
+        watch=None ends at the first stop, as a deployed robot would. watch=task keeps
+        going past an early stop until that task completes, so the eval also learns
+        whether the arm would have finished; every step up to the stop is the same.
+        Returns (obs, step of the first stop or None, tasks complete at the stop or
+        at the end, {task: step it first completed}). Steps count env steps taken."""
+        self.reset_policy()
+        self.vlm.model.eval()
+        stop_at, at_stop, first_done = None, None, {}
+        completions = []  # tasks complete after the last step taken
+        for t in range(self.max_episode_steps):
+            action = self.get_action(obs, prompt)
+            if stop_at is None and self.stopping():
+                stop_at, at_stop = t, completions
+            if stop_at is not None and (watch is None or watch in first_done):
+                break
+            obs, _, _, _, info = env.step(action)
+            completions = info["step_task_completions"]
+            for task in completions:
+                first_done.setdefault(task, t + 1)
+        self.vlm.model.train()
+        return obs, stop_at, completions if at_stop is None else at_stop, first_done
+
+    def run_command(self, env, obs, prompt):
         """Act until the done rule fires or time runs out, then go home.
 
         Returns (obs, done fired, tasks complete when the policy stopped, tasks complete after homing)."""
-        self.reset_policy()
-        self.vlm.model.eval()
-        last_step = time.time()
-
-        def step(action):
-            nonlocal obs, last_step
-            obs, _, _, _, step_info = env.step(action)
-            # Sleep for (slowdown - 1) times what the step took, so slowdown=2 runs at half speed.
-            time.sleep((slowdown - 1) * (time.time() - last_step))
-            last_step = time.time()
-            return step_info
-
-        fired = False
-        info = {"step_task_completions": []}
-        for _ in range(self.max_episode_steps):
-            images, joint_pos = self.process_observation(obs)
-            action = self.get_action(images, prompt, joint_pos)
-            if self.done_streak >= self.done_patience:
-                fired = True
-                break
-            info = step(action)
-        at_stop = info["step_task_completions"]
-
+        obs, stop_at, at_stop, _ = self.rollout(env, obs, prompt)
         for action in itertools.islice(env.home_actions(), env.max_steps):
-            step(action)
+            obs, _, _, _, info = env.step(action)
         worst = np.abs(env.home - env.unwrapped.data.qpos[:9]).max()
         if worst >= env.tolerance:
             print(f"Homing gave up after {env.max_steps} steps, worst joint still {worst:.3f} rad off", flush=True)
+        obs, _, _, _, info = env.step(np.zeros(env.action_space.shape[0]))
+        return obs, stop_at is not None, at_stop, info["step_task_completions"]
 
-        info = step(np.zeros(env.action_space.shape[0]))
-        self.vlm.model.train()
-        return obs, fired, at_stop, info["step_task_completions"]
+    def test(self, task, prompt=None, render_mode="rgb_array"):
+        """One fresh-scene rollout in play.py's env and loop; returns (reached, one of STOPS).
 
-    def test(self, task, prompt=None, render_mode="rgb_array", slowdown=1.0):
-        """One fresh-scene rollout run as play.py runs a command; returns (one of OUTCOMES, undone by homing)."""
-        env = ArmHomeWrapper(self._make_env(task, render_mode, terminate_on_tasks_completed=False,
-                                            remove_task_when_completed=False))
+        reached: the task completed at some step, whether or not the policy had already
+        stopped. No homing: it comes after the stop, and has its own paired test."""
+        env = self.make_session_env(render_mode)
         obs, _ = env.reset()
-        _, fired, at_stop, after_home = self.run_command(env, obs, prompt or TASKS[task], slowdown)
+        _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or TASKS[task], watch=task)
         env.close()
-        done = task in at_stop
-        outcome = ("correct" if done else "false_stop") if fired else ("miss" if done else "quiet_fail")
-        return outcome, done and task not in after_home
+        reached_at = first_done.get(task)
+        if stop_at is None:
+            return reached_at is not None, "none" if reached_at is None else "never"
+        if reached_at is None:
+            return False, "false_stop"
+        if stop_at < reached_at:
+            return True, "early"
+        if task not in at_stop:
+            return True, "undone"
+        return True, "on_time" if stop_at - reached_at < self.done_window else "late"
