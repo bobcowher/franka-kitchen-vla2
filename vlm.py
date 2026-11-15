@@ -130,7 +130,7 @@ class VisionLanguageModel:
 
 
         inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=False,
-                                do_resize=self.config.get("processor_resize", False))
+                                do_resize=False)
         inputs = inputs.to(self.device, dtype=self.model.dtype)
 
         # Runs matmuls in bf16 so the fp32 and bf16 layers can mix; gradients still land on fp32 weights.
