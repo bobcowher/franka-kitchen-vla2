@@ -1,4 +1,4 @@
-"""Give the policy commands in a row in one live scene. Usage: python scripts/play.py [--checkpoint PATH] [--slowdown N]"""
+"""Give the policy commands in a row in one live scene. Usage: python scripts/play.py [--checkpoint PATH]"""
 import argparse
 import select
 import sys
@@ -20,7 +20,6 @@ def wait_for_line(env):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", default="checkpoints/franka-kitchen-vla2-42-smolvlm2-step5000.pth")
-parser.add_argument("--slowdown", type=float, default=2.0, help="2 runs at half speed")
 args = parser.parse_args()
 
 agent = Agent(eval=True)
@@ -41,7 +40,7 @@ while True:
     prompt = typed or prompt
     if prompt is None:
         continue
-    obs, fired, _, completed = agent.run_command(env, obs, prompt, slowdown=args.slowdown)
+    obs, fired, _, completed = agent.run_command(env, obs, prompt)
     print(f"done {'fired' if fired else 'never fired'}, went home. Complete now: {', '.join(completed) or 'nothing'}")
 
 env.close()

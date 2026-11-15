@@ -111,7 +111,9 @@ class Dataset():
 
     def sample_batch(self, batch_size, chunk_size=1):
         """Random usable steps, each with the chunk_size actions starting there. action_mask is False where a chunk runs past its episode or into frames kept out of the action loss."""
-        batch = np.random.choice(np.flatnonzero(self.action_ok_memory[:self.mem_ctr]), batch_size)
+        # Done frames are drawn too, for the done head; action_mask keeps their actions out of the action loss.
+        usable = self.action_ok_memory[:self.mem_ctr] | self.terminal_memory[:self.mem_ctr]
+        batch = np.random.choice(np.flatnonzero(usable), batch_size)
         episode_end = self.episode_end_memory[batch][:, None]
         steps = batch[:, None] + np.arange(chunk_size)  # (batch, chunk) rows of the actions to predict
         action_mask = steps < episode_end
