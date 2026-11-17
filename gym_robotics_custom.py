@@ -2,6 +2,7 @@ import time
 import mujoco
 import numpy as np
 from gymnasium import ObservationWrapper, Wrapper, spaces
+from gymnasium_robotics.envs.franka_kitchen.kitchen_env import OBS_ELEMENT_GOALS, OBS_ELEMENT_INDICES
 import frames
 
 
@@ -171,3 +172,38 @@ class ArmHomeWrapper(Wrapper):
         while np.abs(self.home - env.data.qpos[:9]).max() >= self.tolerance:
             # act_rng converts a joint velocity in rad/s into the [-1, 1] action.
             yield np.clip(self.kp * (self.home - env.data.qpos[:9]) / env.robot_env.act_rng[:9], -1.0, 1.0)
+
+
+class CloseTaskWrapper(Wrapper):
+    """Starts the scene with one cabinet open and reports "close <task>" once it is shut again.
+
+    The door is set straight to the open task's goal and the arm is left at home,
+    so the scene looks like one a chained demo leaves behind (demos end the slide
+    at 0.34 and the hinge at 1.55, against goals of 0.37 and 1.45). The env has no
+    close goals, so completion is checked here: within band_fraction of the
+    closed-to-open span from closed. The env's own 0.3 band would count the slide,
+    whose whole span is 0.37, as closed after barely moving.
+    """
+
+    def __init__(self, env, open_task, band_fraction):
+        super().__init__(env)
+        self.task = f"close {open_task}"
+        self.indices = OBS_ELEMENT_INDICES[open_task]
+        self.closed = np.array(env.unwrapped.robot_env.init_qpos[self.indices], dtype=float)
+        self.open = OBS_ELEMENT_GOALS[open_task]
+        self.band = band_fraction * np.linalg.norm(self.open - self.closed)
+
+    def reset(self, **kwargs):
+        self.env.reset(**kwargs)
+        kitchen = self.unwrapped
+        kitchen.data.qpos[self.indices] = self.open
+        kitchen.data.qvel[self.indices] = 0.0
+        mujoco.mj_forward(kitchen.model, kitchen.data)
+        obs, _, _, _, info = self.step(np.zeros(self.action_space.shape[0]))  # one held step, so obs shows the open door
+        return obs, info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if np.linalg.norm(self.unwrapped.data.qpos[self.indices] - self.closed) < self.band:
+            info["step_task_completions"] = info["step_task_completions"] + [self.task]
+        return obs, reward, terminated, truncated, info

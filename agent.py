@@ -16,7 +16,7 @@ import subprocess
 import gymnasium as gym 
 import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import ArmHomeWrapper, HeldSetpointWrapper, RealTimeWrapper, VLAObservationWrapper
+from gym_robotics_custom import ArmHomeWrapper, CloseTaskWrapper, HeldSetpointWrapper, RealTimeWrapper, VLAObservationWrapper
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 import frames
 from dataset import Dataset
 from vlm import VisionLanguageModel
-from tasks import HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
+from tasks import CLOSE_PHRASES, CLOSE_TASKS, HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
 
 from config import SMOLVLM2_CONFIG_500M
 
@@ -73,7 +73,8 @@ class Agent:
                  done_patience=2,
                  done_window=20,
                  done_learning_rate=3e-4,
-                 lora_rank=16):
+                 lora_rank=16,
+                 close_band_fraction=0.2):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -90,6 +91,7 @@ class Agent:
         self.done_patience = done_patience
         self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
         self.lora_rank = lora_rank  # 0 unfreezes the last four layers in full; >0 trains adapters on every layer
+        self.close_band_fraction = close_band_fraction  # a close task is done within this fraction of the door's span from shut
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -294,10 +296,14 @@ class Agent:
         """One fresh-scene rollout in play.py's env and loop; returns (reached, one of STOPS).
 
         reached: the task completed at some step, whether or not the policy had already
-        stopped. No homing: it comes after the stop, and has its own paired test."""
+        stopped. No homing: it comes after the stop, and has its own paired test.
+        A CLOSE_TASKS task starts with its cabinet open."""
         env = self.make_session_env(render_mode)
+        if task in CLOSE_TASKS:
+            env = CloseTaskWrapper(env, CLOSE_TASKS[task], self.close_band_fraction)
         obs, _ = env.reset()
-        _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or TASKS[task], watch=task)
+        default_prompt = CLOSE_PHRASES[task][0] if task in CLOSE_TASKS else TASKS[task]
+        _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or default_prompt, watch=task)
         env.close()
         reached_at = first_done.get(task)
         if stop_at is None:

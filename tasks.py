@@ -176,6 +176,15 @@ HELDOUT_PHRASES = {
                    "Could you turn on the upper left stove burner?", "top left burner knob: turn"],
 }
 
+# Eval-only: each reverses an open task, with the scene starting open. No demo closes anything.
+CLOSE_TASKS = {"close hinge cabinet": "hinge cabinet", "close slide cabinet": "slide cabinet"}
+CLOSE_PHRASES = {
+    "close hinge cabinet": ["Close the cabinet second from the left", "Shut the second cabinet from the left",
+                            "Swing the cabinet second from the left closed", "Push the hinged cabinet door shut"],
+    "close slide cabinet": ["Slide the cabinet door closed", "Close the sliding cabinet door",
+                            "Shut the sliding door of the cabinet", "Slide the cabinet door back shut"],
+}
+
 
 def sample_phrases(task_descriptions):
     """Swap each stored task description for a random synonymous phrase."""
