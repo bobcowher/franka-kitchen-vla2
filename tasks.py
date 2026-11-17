@@ -162,7 +162,6 @@ STYLE_PHRASES = {
         "Take hold of the second cabinet from the left and swing its door open",
     ],
 }
-_PHRASES_BY_DESCRIPTION = {TASKS[task]: TASK_PHRASES[task] + STYLE_PHRASES[task] for task in TASKS}
 
 # Never trained on: eval checks the policy follows wording it hasn't seen.
 HELDOUT_PHRASES = {
@@ -184,6 +183,16 @@ CLOSE_PHRASES = {
     "close slide cabinet": ["Slide the cabinet door closed", "Close the sliding cabinet door",
                             "Shut the sliding door of the cabinet", "Slide the cabinet door back shut"],
 }
+# Training phrases for close tasks with demos; index 0 is the shards' description. None repeat CLOSE_PHRASES.
+CLOSE_TRAIN_PHRASES = {
+    "close slide cabinet": ["Slide the cabinet door shut", "Push the sliding cabinet door shut",
+                            "Close the cabinet by sliding its door", "Slide shut the cabinet door",
+                            "Move the sliding door of the cabinet to close it", "Please slide the cabinet shut",
+                            "sliding door closed", "Slide the door of the cabinet closed"],
+}
+_PHRASES_BY_DESCRIPTION = {TASKS[task]: TASK_PHRASES[task] + STYLE_PHRASES[task] for task in TASKS}
+_PHRASES_BY_DESCRIPTION.update({phrases[0]: phrases for phrases in CLOSE_TRAIN_PHRASES.values()})
+assert not {p for ps in CLOSE_TRAIN_PHRASES.values() for p in ps} & {p for ps in CLOSE_PHRASES.values() for p in ps}
 
 
 def sample_phrases(task_descriptions):
