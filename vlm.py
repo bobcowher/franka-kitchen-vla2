@@ -14,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, lora_rank=0, lora_alpha=32):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, lora_rank=16, lora_alpha=32):
 
         torch.manual_seed(123)
 
@@ -39,14 +39,8 @@ class VisionLanguageModel:
         for param in self.model.parameters():
             param.requires_grad = False
 
-        if lora_rank:
-            # Adapters on every layer instead of unfreezing the last four; the backbone stays frozen bf16.
-            add_lora(self.model.model.text_model, lora_rank, lora_alpha)
-        else:
-            # Trained weights need fp32 so Adam's small updates aren't rounded away; autocast below bridges the dtypes.
-            self.model.model.text_model.layers[-4:].float()
-            for param in self.model.model.text_model.layers[-4:].parameters():
-                param.requires_grad = True
+        # After the freeze, so the new adapters are the only trainable weights in the text model; the backbone stays frozen bf16.
+        add_lora(self.model.model.text_model, lora_rank, lora_alpha)
 
         # One flat output per action in the chunk; forward reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
@@ -158,7 +152,8 @@ class LoRALinear(nn.Module):
         super().__init__()
         self.base = base
         self.scale = alpha / rank
-        self.down = nn.Linear(base.in_features, rank, bias=False)  # fp32, so Adam's small updates survive
+        # fp32 so Adam's small updates aren't rounded away; autocast bridges them to the bf16 base.
+        self.down = nn.Linear(base.in_features, rank, bias=False)
         self.up = nn.Linear(rank, base.out_features, bias=False)
         nn.init.kaiming_uniform_(self.down.weight, a=math.sqrt(5))
         nn.init.zeros_(self.up.weight)  # starts as exactly the pretrained layer
