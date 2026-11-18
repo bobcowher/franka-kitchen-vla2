@@ -72,7 +72,8 @@ class Agent:
                  done_threshold=0.5,
                  done_patience=2,
                  done_window=20,
-                 done_learning_rate=3e-4):
+                 done_learning_rate=3e-4,
+                 lora_rank=16):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -88,6 +89,7 @@ class Agent:
         self.done_threshold = done_threshold
         self.done_patience = done_patience
         self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
+        self.lora_rank = lora_rank  # adapter rank on every attention and MLP projection
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
@@ -109,7 +111,8 @@ class Agent:
         
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
                                        num_actions=num_actions,
-                                       chunk_size=self.chunk_size)
+                                       chunk_size=self.chunk_size,
+                                       lora_rank=lora_rank)
         self.reset_policy()
 
         # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
