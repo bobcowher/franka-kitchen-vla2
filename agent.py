@@ -89,7 +89,7 @@ class Agent:
         self.done_threshold = done_threshold
         self.done_patience = done_patience
         self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
-        self.lora_rank = lora_rank  # 0 unfreezes the last four layers in full; >0 trains adapters on every layer
+        self.lora_rank = lora_rank  # adapter rank on every attention and MLP projection
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
