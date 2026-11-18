@@ -254,6 +254,13 @@ class Agent:
         env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
         return ArmHomeWrapper(env)
 
+    def make_test_env(self, task, render_mode="rgb_array"):
+        """A session env for one test rollout; a CLOSE_TASKS task starts with its cabinet open."""
+        env = self.make_session_env(render_mode)
+        if task in CLOSE_TASKS:
+            env = CloseTaskWrapper(env, CLOSE_TASKS[task], self.close_band_fraction)
+        return env
+
     def rollout(self, env, obs, prompt, watch=None):
         """Runs the policy from obs, the one loop both play.py and the eval use.
 
@@ -296,11 +303,8 @@ class Agent:
         """One fresh-scene rollout in play.py's env and loop; returns (reached, one of STOPS).
 
         reached: the task completed at some step, whether or not the policy had already
-        stopped. No homing: it comes after the stop, and has its own paired test.
-        A CLOSE_TASKS task starts with its cabinet open."""
-        env = self.make_session_env(render_mode)
-        if task in CLOSE_TASKS:
-            env = CloseTaskWrapper(env, CLOSE_TASKS[task], self.close_band_fraction)
+        stopped. No homing: it comes after the stop, and has its own paired test."""
+        env = self.make_test_env(task, render_mode)
         obs, _ = env.reset()
         default_prompt = CLOSE_PHRASES[task][0] if task in CLOSE_TASKS else TASKS[task]
         _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or default_prompt, watch=task)
