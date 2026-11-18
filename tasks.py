@@ -175,7 +175,7 @@ HELDOUT_PHRASES = {
                    "Could you turn on the upper left stove burner?", "top left burner knob: turn"],
 }
 
-# Eval-only: each reverses an open task, with the scene starting open. No demo closes anything.
+# Each reverses an open task, with the scene starting open. Close slide has demos; close hinge is eval-only.
 CLOSE_TASKS = {"close hinge cabinet": "hinge cabinet", "close slide cabinet": "slide cabinet"}
 CLOSE_PHRASES = {
     "close hinge cabinet": ["Close the cabinet second from the left", "Shut the second cabinet from the left",
