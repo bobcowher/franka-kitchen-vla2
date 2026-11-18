@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import Agent
+from gym_robotics_custom import make_session_env
 
 
 def wait_for_line(env):
@@ -25,7 +26,7 @@ args = parser.parse_args()
 agent = Agent(eval=True)
 agent.vlm.load_the_model(args.checkpoint)
 
-env = agent.make_session_env()
+env = make_session_env("human", agent.max_episode_steps, agent.image_size)
 obs, _ = env.reset()
 
 prompt = None

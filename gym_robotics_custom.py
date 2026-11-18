@@ -1,9 +1,12 @@
 import time
+import gymnasium as gym
+import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 import mujoco
 import numpy as np
 from gymnasium import ObservationWrapper, Wrapper, spaces
 from gymnasium_robotics.envs.franka_kitchen.kitchen_env import OBS_ELEMENT_GOALS, OBS_ELEMENT_INDICES
 import frames
+from tasks import CLOSE_TASKS, TASKS
 
 
 class RealTimeWrapper(Wrapper):
@@ -207,3 +210,30 @@ class CloseTaskWrapper(Wrapper):
         if np.linalg.norm(self.unwrapped.data.qpos[self.indices] - self.closed) < self.band:
             info["step_task_completions"] = info["step_task_completions"] + [self.task]
         return obs, reward, terminated, truncated, info
+
+
+def make_kitchen_env(tasks, render_mode, max_episode_steps, image_size, **kitchen_args):
+    """FrankaKitchen with held setpoints and VLA observations; real-time pacing when a window shows it."""
+    env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps,
+                   tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
+    if render_mode == "human":
+        env = RealTimeWrapper(env)
+    env = HeldSetpointWrapper(env)
+    return VLAObservationWrapper(env, image_size=image_size)
+
+
+def make_session_env(render_mode, max_episode_steps, image_size):
+    """An env for many commands in a row: it never ends on success and tracks every task."""
+    env = make_kitchen_env(list(TASKS), render_mode, max_episode_steps, image_size,
+                           terminate_on_tasks_completed=False, remove_task_when_completed=False)
+    return ArmHomeWrapper(env)
+
+
+def make_test_env(task, render_mode, max_episode_steps, image_size, close_band_fraction=0.2):
+    """A session env for one test rollout; a CLOSE_TASKS task starts with its cabinet open.
+
+    close_band_fraction: a close task is done within this fraction of the door's span from shut."""
+    env = make_session_env(render_mode, max_episode_steps, image_size)
+    if task in CLOSE_TASKS:
+        env = CloseTaskWrapper(env, CLOSE_TASKS[task], close_band_fraction)
+    return env

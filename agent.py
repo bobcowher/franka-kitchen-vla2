@@ -13,10 +13,8 @@ import itertools
 import math
 import datetime
 import subprocess
-import gymnasium as gym 
-import gymnasium_robotics  # registers FrankaKitchen-v1; no longer automatic in gymnasium 1.x
 from torch.optim.adam import Adam
-from gym_robotics_custom import ArmHomeWrapper, CloseTaskWrapper, HeldSetpointWrapper, RealTimeWrapper, VLAObservationWrapper
+from gym_robotics_custom import make_kitchen_env, make_test_env
 
 
 from torch.utils.tensorboard import SummaryWriter
@@ -73,8 +71,7 @@ class Agent:
                  done_patience=2,
                  done_window=20,
                  done_learning_rate=3e-4,
-                 lora_rank=16,
-                 close_band_fraction=0.2):
+                 lora_rank=16):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -91,13 +88,12 @@ class Agent:
         self.done_patience = done_patience
         self.done_window = done_window  # env steps after the first reward in which a stop counts as on time
         self.lora_rank = lora_rank  # adapter rank on every attention and MLP projection
-        self.close_band_fraction = close_band_fraction  # a close task is done within this fraction of the door's span from shut
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
         max_buffer_size = 100000
 
-        env = self._make_env(EVAL_TASKS[0], render_mode='rgb_array')
+        env = make_kitchen_env([EVAL_TASKS[0]], "rgb_array", self.max_episode_steps, self.image_size)
         num_actions = env.action_space.shape[0]
         self.dataset = Dataset(max_size=max_buffer_size,
                                image_size=self.image_size,
@@ -122,15 +118,6 @@ class Agent:
                                            if p.requires_grad and not n.startswith("done_head.")]},
                                {"params": self.vlm.model.done_head.parameters(), "lr": done_learning_rate}],
                               self.learning_rate)
-
-    def _make_env(self, task, render_mode, max_episode_steps=None, **kitchen_args):
-        tasks = task if isinstance(task, list) else [task]
-        env = gym.make("FrankaKitchen-v1", max_episode_steps=max_episode_steps or self.max_episode_steps,
-                       tasks_to_complete=tasks, render_mode=render_mode, **kitchen_args)
-        if render_mode == "human":
-            env = RealTimeWrapper(env)
-        env = HeldSetpointWrapper(env)
-        return VLAObservationWrapper(env, image_size=self.image_size)
 
     def process_observation(self,obs):
         images    = obs['camera_scene']
@@ -249,18 +236,6 @@ class Agent:
         """The done rule: done_prob at or above done_threshold on done_patience replans in a row."""
         return self.done_streak >= self.done_patience
 
-    def make_session_env(self, render_mode="human"):
-        """An env for many commands in a row: it never ends on success and tracks every task."""
-        env = self._make_env(list(TASKS), render_mode, terminate_on_tasks_completed=False, remove_task_when_completed=False)
-        return ArmHomeWrapper(env)
-
-    def make_test_env(self, task, render_mode="rgb_array"):
-        """A session env for one test rollout; a CLOSE_TASKS task starts with its cabinet open."""
-        env = self.make_session_env(render_mode)
-        if task in CLOSE_TASKS:
-            env = CloseTaskWrapper(env, CLOSE_TASKS[task], self.close_band_fraction)
-        return env
-
     def rollout(self, env, obs, prompt, watch=None):
         """Runs the policy from obs, the one loop both play.py and the eval use.
 
@@ -304,7 +279,7 @@ class Agent:
 
         reached: the task completed at some step, whether or not the policy had already
         stopped. No homing: it comes after the stop, and has its own paired test."""
-        env = self.make_test_env(task, render_mode)
+        env = make_test_env(task, render_mode, self.max_episode_steps, self.image_size)
         obs, _ = env.reset()
         default_prompt = CLOSE_PHRASES[task][0] if task in CLOSE_TASKS else TASKS[task]
         _, stop_at, at_stop, first_done = self.rollout(env, obs, prompt or default_prompt, watch=task)
