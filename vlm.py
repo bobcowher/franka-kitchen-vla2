@@ -14,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, lora_rank=16, lora_alpha=32):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, control_hidden_dim=756, lora_rank=16, lora_alpha=32):
 
         torch.manual_seed(123)
 
@@ -44,9 +44,11 @@ class VisionLanguageModel:
 
         # One flat output per action in the chunk; forward reshapes it to (chunk, actions).
         self.model.lm_head = RobotControlOutputHead(vla_output_dim=self.config["emb_dim"],
-                                                    n_actions=num_actions * chunk_size)
+                                                    n_actions=num_actions * chunk_size,
+                                                    hidden_dim=control_hidden_dim)
         # The HF forward never calls it; our forward runs it on the last hidden state.
-        self.model.done_head = DoneHead(self.config["emb_dim"], done_hidden_dim)
+        self.model.done_head = DoneHead(vla_output_dim=self.config["emb_dim"], 
+                                        hidden_dim=done_hidden_dim)
 
         self.model.to(self.device)
 
@@ -173,9 +175,9 @@ def add_lora(text_model, rank, alpha):
 
 class DoneHead(nn.Module):
 
-    def __init__(self, input_dim, hidden_dim=256):
+    def __init__(self, vla_output_dim, hidden_dim=256):
         super().__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc1 = nn.Linear(vla_output_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.output = nn.Linear(hidden_dim, 1)
 
