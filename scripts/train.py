@@ -16,4 +16,4 @@ agent = Agent(data_path=f"{DATA}/{task_dirs[0]}")
 for task_dir in task_dirs[1:]:
     agent.dataset.load_data(path=f"{DATA}/{task_dir}")
 
-agent.train(epochs=5000, batch_size=64)
+agent.train(epochs=8000, batch_size=64)
