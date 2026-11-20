@@ -138,8 +138,8 @@ class VisionLanguageModel:
             outputs = self.model(**inputs, output_hidden_states=True)
 
         actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
-        # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
+        # No detach: done's loss also trains the LoRA, so the backbone keeps completion cues like knob angle.
+        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :]).squeeze(-1)
         return actions, done
 
 
