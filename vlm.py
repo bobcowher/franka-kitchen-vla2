@@ -14,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=256, control_hidden_dim=756, lora_rank=16, lora_alpha=32):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32):
 
         torch.manual_seed(123)
 
@@ -175,15 +175,20 @@ def add_lora(text_model, rank, alpha):
 
 class DoneHead(nn.Module):
 
-    def __init__(self, vla_output_dim, hidden_dim=256):
+    def __init__(self, vla_output_dim, hidden_dim=756):
         super().__init__()
-        self.fc1 = nn.Linear(vla_output_dim, hidden_dim)
+        # Same depth and width as RobotControlOutputHead; it deployed more than the 256-wide head (runs 94/96 vs 80/81).
+        self.compression_layer = nn.Linear(vla_output_dim, hidden_dim)
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.output = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x.float()))
+        x = F.relu(self.compression_layer(x.float()))
+        x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
         return self.output(x)
 
 
