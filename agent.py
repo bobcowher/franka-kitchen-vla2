@@ -71,7 +71,8 @@ class Agent:
                  done_patience=2,
                  done_window=20,
                  done_learning_rate=3e-4,
-                 lora_rank=16):
+                 lora_rank=16,
+                 done_grad_scale=0.0):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -110,7 +111,8 @@ class Agent:
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
                                        num_actions=num_actions,
                                        chunk_size=self.chunk_size,
-                                       lora_rank=lora_rank)
+                                       lora_rank=lora_rank,
+                                       done_grad_scale=done_grad_scale)
         self.reset_policy()
 
         # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
@@ -161,7 +163,7 @@ class Agent:
 
             self.optimizer.zero_grad()
 
-            # The done head reads detached features, so its loss only reaches its own weights.
+            # Done's loss reaches the backbone only scaled by done_grad_scale (0 = detached).
             (loss + done_loss).backward()
 
             self.optimizer.step()

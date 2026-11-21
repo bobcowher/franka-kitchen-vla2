@@ -14,9 +14,13 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32,
+                 done_grad_scale=0.0):
 
         torch.manual_seed(123)
+
+        # Share of done's gradient that reaches the LoRA: 0 is a full detach, 1 lets done train the backbone as hard as actions do.
+        self.done_grad_scale = done_grad_scale
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = vlm_config
@@ -134,8 +138,10 @@ class VisionLanguageModel:
             outputs = self.model(**inputs, output_hidden_states=True)
 
         actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
-        # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
+        # Same value forward; backward passes only done_grad_scale of done's gradient into the backbone.
+        features = outputs.hidden_states[-1][:, -1, :]
+        features = features.detach() + self.done_grad_scale * (features - features.detach())
+        done = self.model.done_head(features).squeeze(-1)
         return actions, done
 
 
