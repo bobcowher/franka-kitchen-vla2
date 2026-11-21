@@ -14,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32, image_splitting=False):
 
         torch.manual_seed(123)
 
@@ -22,6 +22,7 @@ class VisionLanguageModel:
         self.config = vlm_config
         self.num_actions = num_actions
         self.chunk_size = chunk_size
+        self.image_splitting = image_splitting  # tile images above 512 into 512 crops plus a global view
         self.processor = AutoProcessor.from_pretrained(
                 self.config["model_id"],
                 revision=self.config["revision"]
@@ -118,14 +119,14 @@ class VisionLanguageModel:
             # Non-empty processor_kwargs stops SmolVLM leaking video kwargs into a warning.
             text = self.processor.apply_chat_template(
                 messages, add_generation_prompt=True,
-                processor_kwargs={"do_image_splitting": False})
+                processor_kwargs={"do_image_splitting": self.image_splitting})
             text_batch.append(text)
         
         image_batch = [[image] for image in images]
 
 
 
-        inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=False,
+        inputs = self.processor(text=text_batch, images=image_batch, return_tensors="pt", padding=True, do_image_splitting=self.image_splitting,
                                 do_resize=False)
         inputs = inputs.to(self.device, dtype=self.model.dtype)
 

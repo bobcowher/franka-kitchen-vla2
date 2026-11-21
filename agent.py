@@ -71,7 +71,11 @@ class Agent:
                  done_patience=2,
                  done_window=20,
                  done_learning_rate=3e-4,
-                 lora_rank=16):
+                 lora_rank=16,
+                 image_size=frames.VLM_SIZE,
+                 image_splitting=False,
+                 grad_accum_steps=1,
+                 max_buffer_size=100000):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -90,8 +94,8 @@ class Agent:
         self.lora_rank = lora_rank  # adapter rank on every attention and MLP projection
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
-        self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
-        max_buffer_size = 100000
+        self.grad_accum_steps = grad_accum_steps  # batch_size is split into this many backward passes per optimizer step
+        self.image_size = image_size  # VLM_SIZE matches the processor; larger needs image_splitting to keep the detail
 
         env = make_kitchen_env([EVAL_TASKS[0]], "rgb_array", self.max_episode_steps, self.image_size)
         num_actions = env.action_space.shape[0]
@@ -110,7 +114,8 @@ class Agent:
         self.vlm = VisionLanguageModel(vlm_config=SMOLVLM2_CONFIG_500M,
                                        num_actions=num_actions,
                                        chunk_size=self.chunk_size,
-                                       lora_rank=lora_rank)
+                                       lora_rank=lora_rank,
+                                       image_splitting=image_splitting)
         self.reset_policy()
 
         # Group 0 is the policy, which follows the LR schedule; group 1 is the done head at a constant rate.
@@ -144,28 +149,13 @@ class Agent:
             lr = self.learning_rate * self._lr_factor(epoch, epochs)
             self.optimizer.param_groups[0]["lr"] = lr
 
-            states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
-           
-            images, joint_pos = self.process_observation(states)
-
-            actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
-            action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
-
-            pred_actions, done_logits = self.vlm.forward(images, sample_phrases(tasks), joint_pos)
-
-            arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
-            gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
-
-            loss = arm_loss + self.gripper_weight * gripper_loss
-            done_loss = self._done_loss(done_logits, states["row"])
-
             self.optimizer.zero_grad()
-
-            # The done head reads detached features, so its loss only reaches its own weights.
-            (loss + done_loss).backward()
-
+            loss = arm_loss = gripper_loss = done_loss = 0.0
+            for _ in range(self.grad_accum_steps):
+                micro = self._micro_step(batch_size // self.grad_accum_steps)
+                loss, arm_loss, gripper_loss, done_loss = (
+                    total + part / self.grad_accum_steps for total, part in zip((loss, arm_loss, gripper_loss, done_loss), micro))
             self.optimizer.step()
-            done_loss = done_loss.item()
 
             if(epoch % 10 == 0):
                 summary_writer.add_scalar("loss/action", loss, epoch)  # what the policy minimizes: arm + gripper_weight * gripper
@@ -175,7 +165,7 @@ class Agent:
                 summary_writer.add_scalar("optim/lr", lr, epoch)
 
             if(epoch % 100 == 0):
-                print(f"Epoch: {epoch} Loss: {loss.item()} Done loss: {done_loss:.4f}", flush=True)
+                print(f"Epoch: {epoch} Loss: {loss} Done loss: {done_loss:.4f}", flush=True)
                 self.vlm.save_the_model()
 
             if(epoch and epoch % 1000 == 0):
@@ -183,6 +173,23 @@ class Agent:
 
         self.vlm.save_the_model()
         self.eval(epochs, summary_writer, rollouts=self.final_eval_rollouts)
+
+    def _micro_step(self, batch_size):
+        """Forward and backward on one sampled batch, scaled for accumulation; returns its losses as floats."""
+        states, actions, action_mask, tasks = self.dataset.sample_batch(batch_size, self.chunk_size)
+        images, joint_pos = self.process_observation(states)
+        actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
+        action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
+
+        pred_actions, done_logits = self.vlm.forward(images, sample_phrases(tasks), joint_pos)
+        arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
+        gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
+        loss = arm_loss + self.gripper_weight * gripper_loss
+        done_loss = self._done_loss(done_logits, states["row"])
+
+        # The done head reads detached features, so its loss only reaches its own weights.
+        ((loss + done_loss) / self.grad_accum_steps).backward()
+        return loss.item(), arm_loss.item(), gripper_loss.item(), done_loss.item()
 
     def _lr_factor(self, epoch, epochs):
         """Linear warmup over warmup_steps, then cosine decay to min_lr_fraction by the last epoch."""
