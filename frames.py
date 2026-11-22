@@ -75,6 +75,8 @@ def resize(frames, size):
 
     width = frames.shape[1]
     if width == size:
+        # Contiguous, since MuJoCo hands back a flipped view that torch refuses.
+        frames = np.ascontiguousarray(frames)
         return frames[0] if single else frames
 
     validate(width, size)
