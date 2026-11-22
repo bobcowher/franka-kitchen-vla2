@@ -136,15 +136,16 @@ class VisionLanguageModel:
 
         actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
         # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
-        return actions, done
+        features = outputs.hidden_states[-1][:, -1, :].detach()
+        done = self.model.done_head(features).squeeze(-1)
+        return actions, done, features
 
 
     @torch.no_grad
     def predict(self, images, prompts, joint_pos):
-        """Clamped action chunks and the done probability, for running the policy."""
-        actions, done = self.forward(images, prompts, joint_pos)
-        return torch.clamp(actions, -1, 1), torch.sigmoid(done)
+        """Clamped action chunks, the done probability, and the features the done head read."""
+        actions, done, features = self.forward(images, prompts, joint_pos)
+        return torch.clamp(actions, -1, 1), torch.sigmoid(done), features
 
 
 

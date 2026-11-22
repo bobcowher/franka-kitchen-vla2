@@ -75,7 +75,8 @@ class Agent:
                  image_size=frames.VLM_SIZE,
                  image_splitting=False,
                  grad_accum_steps=1,
-                 max_buffer_size=100000):
+                 max_buffer_size=100000,
+                 done_model=None):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -95,6 +96,8 @@ class Agent:
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.grad_accum_steps = grad_accum_steps  # batch_size is split into this many backward passes per optimizer step
+        self.done_model = done_model  # a separate stop model on the full frame; None uses the VLM's done head
+        self.image_splitting = image_splitting
         self.image_size = image_size  # VLM_SIZE matches the processor; larger needs image_splitting to keep the detail
 
         env = make_kitchen_env([EVAL_TASKS[0]], "rgb_array", self.max_episode_steps, self.image_size)
@@ -135,6 +138,12 @@ class Agent:
             joint_pos = joint_pos.unsqueeze(0)
 
         return list(images), joint_pos
+
+    def vlm_images(self, images):
+        """Frames as the VLM takes them: larger frames are reduced to VLM_SIZE unless it tiles them."""
+        if self.image_splitting or self.image_size == frames.VLM_SIZE:
+            return images
+        return list(frames.resize(np.stack(images), frames.VLM_SIZE))
 
 
 
@@ -181,7 +190,7 @@ class Agent:
         actions = torch.tensor(actions).to(self.device).float()          # (batch, chunk, 9)
         action_mask = torch.tensor(action_mask).to(self.device).float()  # (batch, chunk)
 
-        pred_actions, done_logits = self.vlm.forward(images, sample_phrases(tasks), joint_pos)
+        pred_actions, done_logits, _ = self.vlm.forward(self.vlm_images(images), sample_phrases(tasks), joint_pos)
         arm_loss     = masked_mse(pred_actions[..., :7], actions[..., :7], action_mask)
         gripper_loss = masked_mse(pred_actions[..., 7:], actions[..., 7:], action_mask)
         loss = arm_loss + self.gripper_weight * gripper_loss
@@ -234,7 +243,9 @@ class Agent:
         """Next action for one env. The model only runs when the queue is empty, i.e. every execute_steps steps."""
         if not self.action_queue:
             images, joint_pos = self.process_observation(obs)
-            chunks, done_prob = self.vlm.predict(images, [prompt], joint_pos)
+            chunks, done_prob, features = self.vlm.predict(self.vlm_images(images), [prompt], joint_pos)
+            if self.done_model is not None:
+                done_prob = self.done_model.predict(images, features)
             self.action_queue = list(chunks[0][:self.execute_steps].cpu().numpy())
             self.done_streak = self.done_streak + 1 if done_prob.item() >= self.done_threshold else 0
         return self.action_queue.pop(0)
