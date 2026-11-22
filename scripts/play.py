@@ -23,7 +23,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", default="checkpoints/franka-kitchen-vla2-42-smolvlm2-step5000.pth")
 args = parser.parse_args()
 
-agent = Agent(eval=True)
+agent = Agent(eval=True, max_buffer_size=1)  # no data loaded, so no 100k-frame buffer
 agent.vlm.load_the_model(args.checkpoint)
 
 env = make_session_env("human", agent.max_episode_steps, agent.image_size)

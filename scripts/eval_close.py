@@ -14,7 +14,7 @@ parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--rollouts", type=int, default=40)
 args = parser.parse_args()
 
-agent = Agent(eval=True)
+agent = Agent(eval=True, max_buffer_size=1)  # no data loaded, so no 100k-frame buffer
 agent.vlm.load_the_model(args.checkpoint)
 
 for task, phrases in CLOSE_PHRASES.items():

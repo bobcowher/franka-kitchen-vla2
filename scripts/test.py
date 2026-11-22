@@ -12,7 +12,7 @@ CHECKPOINT = "checkpoints/franka-kitchen-vla2-42-smolvlm2-step5000.pth"
 
 task = task_from_argv(sys.argv)
 
-agent = Agent(eval=True)
+agent = Agent(eval=True, max_buffer_size=1)  # no data loaded, so no 100k-frame buffer
 agent.vlm.load_the_model(CHECKPOINT)
 
 print(f"{task}: {agent.test(task, render_mode='human')}")

@@ -71,7 +71,8 @@ class Agent:
                  done_patience=2,
                  done_window=20,
                  done_learning_rate=3e-4,
-                 lora_rank=16):
+                 lora_rank=16,
+                 max_buffer_size=100000):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -91,7 +92,6 @@ class Agent:
 
         self.max_episode_steps = 400  # longest demo on file is 314; a policy still going at 400 has failed
         self.image_size = frames.VLM_SIZE  # matches the processor, so it skips resizing
-        max_buffer_size = 100000
 
         env = make_kitchen_env([EVAL_TASKS[0]], "rgb_array", self.max_episode_steps, self.image_size)
         num_actions = env.action_space.shape[0]
