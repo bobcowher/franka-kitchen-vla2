@@ -84,4 +84,4 @@ if __name__ == "__main__":
             agent.dataset.add_episode(jitter.render_episode(data["qpos"], jitter.sample_pose()), data)
         print(f"Jittered copy {copy + 1}/{copies} done, {agent.dataset.mem_ctr} rows, {time.time() - start:.0f}s", flush=True)
 
-    agent.train(epochs=5000, batch_size=64)
+    agent.train(epochs=10000, batch_size=64)  # 3x the rows; at 5000 the done head was still at 0.1-0.2 loss
