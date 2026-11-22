@@ -75,24 +75,34 @@ class Dataset():
         with ThreadPoolExecutor(WORKERS) as pool:
             loaded = pool.map(self._read, files)
 
-            for steps, (camera, data) in zip(steps_per_file, loaded):
-                end = index + steps
-                self.camera_scene_memory[index:end] = camera
-                self.joint_pos_memory[index:end] = data['joint_pos']
-                self.action_memory[index:end] = data['action']
-                self.terminal_memory[index:end] = data['done']
-                self.task_description_memory[index:end] = str(data['task_description'])
-                self.episode_end_memory[index:end] = end  # each shard is one episode
-                done = data['done'].astype(bool)
-                if 'schema_version' in data:
-                    self.action_ok_memory[index:end] = ~(done | data['exclude_action'].astype(bool))
-                index = end
+            for camera, data in loaded:
+                index = self._store(index, camera, data)
 
         self.mem_ctr += total
 
         elapsed = time.time() - start
 
         print(f"Loaded {total} steps from {path} in {elapsed:.1f}s, {self.mem_ctr} in all")
+
+    def add_episode(self, camera, data):
+        """Append one episode: frames already at image_size, plus a shard's other fields."""
+        if self.mem_ctr + len(camera) > self.mem_size:
+            raise ValueError(f"Dataset is full ({self.mem_ctr} of {self.mem_size}); raise max_size.")
+        self.mem_ctr = self._store(self.mem_ctr, camera, data)
+
+    def _store(self, index, camera, data):
+        """Write one episode at index and return the row one past it."""
+        end = index + len(camera)
+        self.camera_scene_memory[index:end] = camera
+        self.joint_pos_memory[index:end] = data['joint_pos']
+        self.action_memory[index:end] = data['action']
+        self.terminal_memory[index:end] = data['done']
+        self.task_description_memory[index:end] = str(data['task_description'])
+        self.episode_end_memory[index:end] = end  # each shard is one episode
+        done = data['done'].astype(bool)
+        if 'schema_version' in data:
+            self.action_ok_memory[index:end] = ~(done | data['exclude_action'].astype(bool))
+        return end
 
     def _read(self, filename):
         """Decompress one shard and reduce its frames, on a worker thread.
