@@ -47,6 +47,7 @@ class Dataset():
         self.episode_end_memory = np.zeros(self.mem_size, dtype=np.int64)
         # False for done and fumble frames in version 2 shards, which stay out of the action loss.
         self.action_ok_memory = np.ones(self.mem_size, dtype=bool)
+        self.files = []  # every shard loaded, in order, so add_camera_jitter can re-render them
 
     def load_data(self, path):
         """Load every npz shard under path, recursively."""
@@ -75,24 +76,53 @@ class Dataset():
         with ThreadPoolExecutor(WORKERS) as pool:
             loaded = pool.map(self._read, files)
 
-            for steps, (camera, data) in zip(steps_per_file, loaded):
-                end = index + steps
-                self.camera_scene_memory[index:end] = camera
-                self.joint_pos_memory[index:end] = data['joint_pos']
-                self.action_memory[index:end] = data['action']
-                self.terminal_memory[index:end] = data['done']
-                self.task_description_memory[index:end] = str(data['task_description'])
-                self.episode_end_memory[index:end] = end  # each shard is one episode
-                done = data['done'].astype(bool)
-                if 'schema_version' in data:
-                    self.action_ok_memory[index:end] = ~(done | data['exclude_action'].astype(bool))
-                index = end
+            for camera, data in loaded:
+                index = self._store(index, camera, data)
 
         self.mem_ctr += total
+        self.files.extend(files)
 
         elapsed = time.time() - start
 
         print(f"Loaded {total} steps from {path} in {elapsed:.1f}s, {self.mem_ctr} in all")
+
+    def add_camera_jitter(self, renderer, copies):
+        """Append copies of every loaded demo, each re-rendered by renderer from its own random camera pose."""
+        needed = self.mem_ctr * (copies + 1)  # every row so far came from self.files
+        if needed > self.mem_size:
+            raise ValueError(
+                f"{copies} jittered copies of {self.mem_ctr} steps need {needed} rows, but this Dataset was built for "
+                f"{self.mem_size}. Raise max_size to {needed} ({needed * self.camera_scene_memory[0].nbytes / 1e9:.1f} GB "
+                f"of frames) or use fewer copies.")
+        start = time.time()
+        files = list(self.files)
+        for copy in range(copies):
+            for filename in files:
+                data = _open(filename)
+                if 'qpos' not in data:
+                    raise ValueError(f"{filename} has no qpos; camera jitter needs version 2 shards.")
+                self.add_episode(renderer.render_episode(data['qpos']), data)
+            print(f"Camera jitter copy {copy + 1}/{copies}: {self.mem_ctr} rows, {time.time() - start:.0f}s", flush=True)
+
+    def add_episode(self, camera, data):
+        """Append one episode: frames already at image_size, plus a shard's other fields."""
+        if self.mem_ctr + len(camera) > self.mem_size:
+            raise ValueError(f"Dataset is full ({self.mem_ctr} of {self.mem_size}); raise max_size.")
+        self.mem_ctr = self._store(self.mem_ctr, camera, data)
+
+    def _store(self, index, camera, data):
+        """Write one episode at index and return the row one past it."""
+        end = index + len(camera)
+        self.camera_scene_memory[index:end] = camera
+        self.joint_pos_memory[index:end] = data['joint_pos']
+        self.action_memory[index:end] = data['action']
+        self.terminal_memory[index:end] = data['done']
+        self.task_description_memory[index:end] = str(data['task_description'])
+        self.episode_end_memory[index:end] = end  # each shard is one episode
+        done = data['done'].astype(bool)
+        if 'schema_version' in data:
+            self.action_ok_memory[index:end] = ~(done | data['exclude_action'].astype(bool))
+        return end
 
     def _read(self, filename):
         """Decompress one shard and reduce its frames, on a worker thread.
