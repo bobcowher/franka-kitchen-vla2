@@ -6,7 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent import Agent
 
-agent = Agent()
+# 2 camera-jittered copies of every demo; 3x the rows needs ~2x the steps for the done head to catch up.
+agent = Agent(camera_jitter_copies=2)
 
-agent.train(epochs=5000, batch_size=64)
+agent.train(epochs=10000, batch_size=64)
 

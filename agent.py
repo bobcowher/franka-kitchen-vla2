@@ -20,6 +20,7 @@ from gym_robotics_custom import make_kitchen_env, make_test_env
 from torch.utils.tensorboard import SummaryWriter
 
 import frames
+from camera_jitter import CameraJitter
 from dataset import Dataset
 from vlm import VisionLanguageModel
 from tasks import CLOSE_PHRASES, CLOSE_TASKS, HELDOUT_PHRASES, TASK_PHRASES, TASKS, sample_phrases
@@ -72,7 +73,8 @@ class Agent:
                  done_window=20,
                  done_learning_rate=3e-4,
                  lora_rank=16,
-                 max_buffer_size=100000):
+                 max_buffer_size=100000,
+                 camera_jitter_copies=0):
         # 0.26 (L1-equalized) left gripper error unchanged and drove the arm off target in run 4; revisit once the model sees joint state.
         self.gripper_weight = gripper_weight
         # Action chunking, as in ACT and diffusion policy: predict the next chunk_size actions, run the first execute_steps, then look again.
@@ -103,6 +105,11 @@ class Agent:
 
         if not eval:
             self.dataset.load_data(path=data_path)
+            if camera_jitter_copies:
+                # Extra copies of every demo seen from a moved camera; needs (copies + 1) x the steps in max_buffer_size.
+                jitter = CameraJitter(image_size=self.image_size)
+                self.dataset.add_camera_jitter(jitter, camera_jitter_copies)
+                jitter.close()
 
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
