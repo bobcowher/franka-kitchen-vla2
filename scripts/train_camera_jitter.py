@@ -1,4 +1,4 @@
-"""Experiment: train run 103's config on its demos plus copies re-rendered from random scene-camera poses.
+"""Experiment: image-only (no joint text) run 103 config on its demos plus copies re-rendered from random scene-camera poses.
 
 Replay from stored qpos is exact, so each copy is the same demo seen from a moved camera. The pose is
 drawn once per episode, the way a mounted camera would sit. Env: TASK_DIRS (colon-separated v2 folders).
@@ -18,8 +18,14 @@ from gymnasium_robotics.envs.franka_kitchen.franka_env import DEFAULT_CAMERA_CON
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import frames
+import vlm as vlm_module
 from agent import Agent
 from dataset import _open
+
+
+def no_joint_state(self, prompts, joint_pos):
+    """_add_joint_state with the joints left out: image + language only."""
+    return list(prompts)
 
 
 class JitterRenderer:
@@ -65,6 +71,7 @@ class JitterRenderer:
 
 
 if __name__ == "__main__":
+    vlm_module.VisionLanguageModel._add_joint_state = no_joint_state
     data_root = "/data/datasets/franka-kitchen-v2"
     task_dirs = os.environ["TASK_DIRS"].split(":")
     copies = 2  # jittered copies per demo, on top of the original
