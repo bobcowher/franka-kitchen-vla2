@@ -1,4 +1,6 @@
-"""Experiment: deployment success when the joint readings carry a constant offset, as after an encoder swap or re-zero.
+"""Experiment: deployment success when each joint reading carries its own constant offset, as after zeroing the arm by eye.
+
+Each rollout draws a fresh per-joint offset, uniform within the condition's half-width, so a condition is many hand calibrations.
 
 Env: CHECKPOINT_URL (a policy checkpoint to fetch). Train wording only, ROLLOUTS per task per condition.
 Actions are joint velocities, so only the observed joint_pos is offset; the arm itself is untouched.
@@ -20,33 +22,33 @@ from tasks import TASKS
 from vlm import JOINT_MAX, JOINT_MIN
 
 ROLLOUTS = 20
-ARM = slice(0, 7)
-FINGERS = slice(7, 9)
-# (name, joints, offset): arm offsets in degrees, finger offsets in millimetres; "blank" pins every joint mid-range.
-CONDITIONS = [("base", None, 0), ("arm+0.5deg", ARM, 0.5), ("arm+1deg", ARM, 1), ("arm-1deg", ARM, -1),
-              ("arm+2deg", ARM, 2), ("arm-2deg", ARM, -2), ("arm+5deg", ARM, 5), ("arm-5deg", ARM, -5),
-              ("j2+1deg", slice(1, 2), 1), ("j2-1deg", slice(1, 2), -1), ("fingers+1mm", FINGERS, 1),
-              ("fingers-1mm", FINGERS, -1), ("blank", None, None)]
-offset = np.zeros(9, dtype=np.float32)
-blank = [False]
-
-
-def set_condition(joints, amount):
-    """Point the module-level offset at one condition."""
-    offset[:] = 0
-    blank[0] = amount is None
-    if joints is not None:
-        offset[joints] = np.radians(amount) if joints != FINGERS else amount / 1000
+# (name, arm half-width in degrees, finger half-width in millimetres); "blank" pins every joint mid-range.
+CONDITIONS = [("base", 0, 0), ("rand3deg", 3, 1), ("rand5deg", 5, 1), ("rand10deg", 10, 1), ("rand15deg", 15, 1),
+              ("rand20deg", 20, 1), ("blank", None, None)]
+condition = [0, 0]  # arm, finger half-widths for the running condition; None = blank
 
 
 class JointOffsetWrapper(ObservationWrapper):
-    """Adds the current offset to observed joint_pos, or replaces it with mid-range when blanked."""
+    """Adds a per-rollout random offset to observed joint_pos, or replaces it with mid-range when blanked."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        self.rng = np.random.default_rng()
+        self.offset = np.zeros(9, dtype=np.float32)
+
+    def reset(self, **kwargs):
+        arm, finger = condition
+        self.offset[:] = 0
+        if arm is not None:
+            self.offset[:7] = np.radians(self.rng.uniform(-arm, arm, 7))
+            self.offset[7:] = self.rng.uniform(-finger, finger, 2) / 1000
+        return super().reset(**kwargs)
 
     def observation(self, observation):
-        if blank[0]:
+        if condition[0] is None:
             joint_pos = ((JOINT_MIN + JOINT_MAX) / 2).numpy().astype(np.float32)
         else:
-            joint_pos = observation["joint_pos"] + offset
+            joint_pos = observation["joint_pos"] + self.offset
         return {**observation, "joint_pos": joint_pos}
 
 
@@ -62,8 +64,8 @@ agent = Agent(eval=True, max_buffer_size=1)
 agent.vlm.load_the_model("checkpoints/policy.pth")
 
 table = []
-for name, joints, amount in CONDITIONS:
-    set_condition(joints, amount)
+for name, arm, finger in CONDITIONS:
+    condition[:] = [arm, finger]
     row = [name]
     for task in EVAL_TASKS:
         cell = [agent.test(task, TASKS[task]) for _ in range(ROLLOUTS)]
