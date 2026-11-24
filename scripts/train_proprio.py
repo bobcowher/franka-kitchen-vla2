@@ -1,10 +1,11 @@
-"""Experiment: run 103's config with the joint input changed, for robustness to encoder offsets.
+"""Experiment: run 103's config with the joint input changed, and action chunking off (one action per model pass).
 
 Env: TASK_DIRS (colon-separated v2 folders), PROPRIO_MODE:
   none            joint text dropped from the prompt (image + language only)
   vel             joint velocities in place of positions (offset-invariant)
   offset          positions, plus a random constant offset per training sample
   offset_dropout  offset, and half the samples pinned mid-range (what eval_encoder's blank shows)
+  positions       joint positions unchanged, as in run 103
 """
 import functools
 import os
@@ -80,7 +81,8 @@ if mode == "vel":
 if mode == "none":
     vlm_module.VisionLanguageModel._add_joint_state = no_joint_state
 
-agent = Agent(data_path=f"{DATA}/{task_dirs[0]}", max_buffer_size=30000)
+# done_patience 8 keeps the stop rule at 8 env steps, as 2 replans x 4 executed steps did with chunking.
+agent = Agent(data_path=f"{DATA}/{task_dirs[0]}", max_buffer_size=30000, chunk_size=1, execute_steps=1, done_patience=8)
 for task_dir in task_dirs[1:]:
     agent.dataset.load_data(path=f"{DATA}/{task_dir}")
 
