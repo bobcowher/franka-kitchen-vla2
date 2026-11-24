@@ -1,4 +1,4 @@
-"""Experiment: deployment success when the scene camera is moved off the pose every demo was recorded from.
+"""Experiment: image-only policy (no joint text), deployment success when the scene camera is moved off the pose every demo was recorded from.
 
 Env: CHECKPOINT_URL (a policy checkpoint to fetch). Train wording only, ROLLOUTS per task per pose.
 """
@@ -12,6 +12,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agent as agent_module
+import vlm as vlm_module
 from agent import DEPLOYED_SUCCESS, EVAL_TASKS, Agent
 from gym_robotics_custom import make_test_env
 from gymnasium_robotics.envs.franka_kitchen.franka_env import DEFAULT_CAMERA_CONFIG
@@ -24,6 +25,11 @@ POSES = [("base", None, 0), ("az+5", "azimuth", 5), ("az-5", "azimuth", -5), ("a
          ("dist+0.22", "distance", 0.22), ("dist-0.22", "distance", -0.22),
          ("look_x+0.05", "lookat", 0.05), ("look_x-0.05", "lookat", -0.05)]
 camera = dict(DEFAULT_CAMERA_CONFIG)
+
+
+def no_joint_state(self, prompts, joint_pos):
+    """_add_joint_state with the joints left out: image + language only."""
+    return list(prompts)
 
 
 def set_pose(field, offset):
@@ -43,6 +49,7 @@ def make_moved_test_env(*args, **kwargs):
     return env
 
 
+vlm_module.VisionLanguageModel._add_joint_state = no_joint_state
 agent_module.make_test_env = make_moved_test_env  # Agent.test builds its env through this name
 os.makedirs("checkpoints", exist_ok=True)
 urllib.request.urlretrieve(os.environ["CHECKPOINT_URL"], "checkpoints/policy.pth")
