@@ -1,4 +1,4 @@
-"""Experiment: train run 103's config on its demos plus copies re-rendered from random scene-camera poses.
+"""Experiment: run 119's offset+dropout joints (proprio D) on run 103's demos plus copies re-rendered from random scene-camera poses.
 
 Replay from stored qpos is exact, so each copy is the same demo seen from a moved camera. The pose is
 drawn once per episode, the way a mounted camera would sit. Env: TASK_DIRS (colon-separated v2 folders).
@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import functools
+
 import gymnasium as gym
 import gymnasium_robotics  # noqa: F401  registers FrankaKitchen-v1
 import mujoco
@@ -18,8 +20,13 @@ from gymnasium_robotics.envs.franka_kitchen.franka_env import DEFAULT_CAMERA_CON
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import frames
+import vlm as vlm_module
 from agent import Agent
 from dataset import _open
+
+ARM_OFFSET = np.radians(3.0)  # uniform half-width per arm joint, as in run 119
+FINGER_OFFSET = 0.001  # metres
+DROPOUT = 0.5
 
 
 class JitterRenderer:
@@ -64,6 +71,18 @@ class JitterRenderer:
         return out
 
 
+def augmented_sample_batch(sample_batch, batch_size, chunk_size=1):
+    """sample_batch with a random constant offset on every sample's joints, and half pinned mid-range."""
+    state, actions, mask, tasks = sample_batch(batch_size, chunk_size)
+    joints = state["joint_pos"].copy()
+    joints[:, :7] += np.random.uniform(-ARM_OFFSET, ARM_OFFSET, (len(joints), 7))
+    joints[:, 7:] += np.random.uniform(-FINGER_OFFSET, FINGER_OFFSET, (len(joints), joints.shape[1] - 7))
+    drop = np.random.rand(len(joints)) < DROPOUT
+    joints[drop] = ((vlm_module.JOINT_MIN + vlm_module.JOINT_MAX) / 2).numpy()
+    state["joint_pos"] = joints.astype(np.float32)
+    return state, actions, mask, tasks
+
+
 if __name__ == "__main__":
     data_root = "/data/datasets/franka-kitchen-v2"
     task_dirs = os.environ["TASK_DIRS"].split(":")
@@ -84,4 +103,5 @@ if __name__ == "__main__":
             agent.dataset.add_episode(jitter.render_episode(data["qpos"], jitter.sample_pose()), data)
         print(f"Jittered copy {copy + 1}/{copies} done, {agent.dataset.mem_ctr} rows, {time.time() - start:.0f}s", flush=True)
 
+    agent.dataset.sample_batch = functools.partial(augmented_sample_batch, agent.dataset.sample_batch)
     agent.train(epochs=10000, batch_size=64)  # 3x the rows; at 5000 the done head was still at 0.1-0.2 loss
