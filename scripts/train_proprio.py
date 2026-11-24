@@ -22,7 +22,7 @@ import vlm as vlm_module
 from agent import Agent
 
 DATA = "/data/datasets/franka-kitchen-v2"
-ARM_OFFSET = np.radians(3.0)  # uniform half-width per arm joint; eval_encoder sweeps 0.5-5 deg
+ARM_OFFSET = np.radians(10.0)  # uniform half-width per arm joint; covers zeroing the real arm by eye
 FINGER_OFFSET = 0.001  # metres
 DROPOUT = 0.5
 
