@@ -1,4 +1,4 @@
-"""Experiment: run 119's offset+dropout joints (proprio D) on run 103's demos plus copies re-rendered from random scene-camera poses.
+"""Experiment: run 118's offset joints (proprio C, no dropout) on run 103's demos plus copies re-rendered from random scene-camera poses.
 
 Replay from stored qpos is exact, so each copy is the same demo seen from a moved camera. The pose is
 drawn once per episode, the way a mounted camera would sit. Env: TASK_DIRS (colon-separated v2 folders).
@@ -26,7 +26,7 @@ from dataset import _open
 
 ARM_OFFSET = np.radians(3.0)  # uniform half-width per arm joint, as in run 119
 FINGER_OFFSET = 0.001  # metres
-DROPOUT = 0.5
+DROPOUT = 0.0  # proprio C: encoders hold zero across power cycles, so joints are never missing
 
 
 class JitterRenderer:
