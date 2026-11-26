@@ -1,4 +1,4 @@
-"""Experiment: how hinge cabinet fails at the camera poses where seed 2 (run 140) stopped badly, by stop type.
+"""Experiment: stricter stop rules on hinge cabinet at the poses where seed 2 (run 140) stopped early (run 143).
 
 Env: CHECKPOINT_URL (a policy checkpoint to fetch). Train wording only, ROLLOUTS per task per pose.
 """
@@ -22,6 +22,8 @@ ROLLOUTS = 20
 # (name, field, offset): azimuth/elevation in degrees, distance in metres, lookat in metres along world x.
 POSES = [("base", None, 0), ("az+5", "azimuth", 5), ("el-5", "elevation", -5), ("look_x-0.05", "lookat", -0.05)]
 TASK = "hinge cabinet"
+# (done_threshold, done_patience); run 143 was the default (0.5, 2).
+RULES = [(0.5, 4), (0.5, 8), (0.8, 2)]
 camera = dict(DEFAULT_CAMERA_CONFIG)
 
 
@@ -48,8 +50,11 @@ urllib.request.urlretrieve(os.environ["CHECKPOINT_URL"], "checkpoints/policy.pth
 agent = Agent(eval=True, max_buffer_size=1)
 agent.vlm.load_the_model("checkpoints/policy.pth")
 
-for name, field, offset in POSES:
-    set_pose(field, offset)
-    cell = [agent.test(TASK, TASKS[TASK]) for _ in range(ROLLOUTS)]
-    stops = Counter(s for _, s in cell)
-    print(f"  pose {name}: reached {sum(r for r, _ in cell)}/{ROLLOUTS}  " + "  ".join(f"{s} {stops[s]}" for s in STOPS), flush=True)
+for threshold, patience in RULES:
+    agent.done_threshold, agent.done_patience = threshold, patience
+    for name, field, offset in POSES:
+        set_pose(field, offset)
+        cell = [agent.test(TASK, TASKS[TASK]) for _ in range(ROLLOUTS)]
+        stops = Counter(s for _, s in cell)
+        print(f"  rule {threshold}/{patience} pose {name}: reached {sum(r for r, _ in cell)}/{ROLLOUTS}  "
+              + "  ".join(f"{s} {stops[s]}" for s in STOPS), flush=True)
