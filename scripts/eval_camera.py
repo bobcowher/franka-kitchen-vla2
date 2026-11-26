@@ -1,8 +1,9 @@
-"""Experiment: deployment success when the scene camera is moved off the pose every demo was recorded from.
+"""Experiment: how hinge cabinet fails at the camera poses where seed 2 (run 140) stopped badly, by stop type.
 
 Env: CHECKPOINT_URL (a policy checkpoint to fetch). Train wording only, ROLLOUTS per task per pose.
 """
 import os
+from collections import Counter
 import sys
 import urllib.request
 from pathlib import Path
@@ -12,17 +13,15 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import agent as agent_module
-from agent import DEPLOYED_SUCCESS, EVAL_TASKS, Agent
+from agent import STOPS, Agent
 from gym_robotics_custom import make_test_env
 from gymnasium_robotics.envs.franka_kitchen.franka_env import DEFAULT_CAMERA_CONFIG
 from tasks import TASKS
 
 ROLLOUTS = 20
 # (name, field, offset): azimuth/elevation in degrees, distance in metres, lookat in metres along world x.
-POSES = [("base", None, 0), ("az+5", "azimuth", 5), ("az-5", "azimuth", -5), ("az+15", "azimuth", 15),
-         ("az-15", "azimuth", -15), ("el+5", "elevation", 5), ("el-5", "elevation", -5),
-         ("dist+0.22", "distance", 0.22), ("dist-0.22", "distance", -0.22),
-         ("look_x+0.05", "lookat", 0.05), ("look_x-0.05", "lookat", -0.05)]
+POSES = [("base", None, 0), ("az+5", "azimuth", 5), ("el-5", "elevation", -5), ("look_x-0.05", "lookat", -0.05)]
+TASK = "hinge cabinet"
 camera = dict(DEFAULT_CAMERA_CONFIG)
 
 
@@ -49,17 +48,8 @@ urllib.request.urlretrieve(os.environ["CHECKPOINT_URL"], "checkpoints/policy.pth
 agent = Agent(eval=True, max_buffer_size=1)
 agent.vlm.load_the_model("checkpoints/policy.pth")
 
-table = []
 for name, field, offset in POSES:
     set_pose(field, offset)
-    row = [name]
-    for task in EVAL_TASKS:
-        cell = [agent.test(task, TASKS[task]) for _ in range(ROLLOUTS)]
-        row.append(f"{sum(r for r, _ in cell)}/{sum(s in DEPLOYED_SUCCESS for _, s in cell)}")
-    print(f"  pose {name}: " + "  ".join(f"{t} {c}" for t, c in zip(EVAL_TASKS, row[1:])), flush=True)
-    table.append(row)
-
-print("\nreached/deployed per task, out of", ROLLOUTS)
-print("| pose | " + " | ".join(EVAL_TASKS) + " |")
-for row in table:
-    print("| " + " | ".join(row) + " |")
+    cell = [agent.test(TASK, TASKS[TASK]) for _ in range(ROLLOUTS)]
+    stops = Counter(s for _, s in cell)
+    print(f"  pose {name}: reached {sum(r for r, _ in cell)}/{ROLLOUTS}  " + "  ".join(f"{s} {stops[s]}" for s in STOPS), flush=True)
