@@ -1,8 +1,9 @@
-"""Experiment: image-only (no joint text) run 103 config on its demos plus copies re-rendered from random scene-camera poses.
+"""Experiment: image + previous action (no joints) run 103 config on its demos plus copies re-rendered from random scene-camera poses.
 
 Replay from stored qpos is exact, so each copy is the same demo seen from a moved camera. The pose is
 drawn once per episode, the way a mounted camera would sit. Env: TASK_DIRS (colon-separated v2 folders).
 """
+import functools
 import glob
 import os
 import sys
@@ -18,14 +19,17 @@ from gymnasium_robotics.envs.franka_kitchen.franka_env import DEFAULT_CAMERA_CON
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import frames
+import agent as agent_module
+import prev_action
 import vlm as vlm_module
 from agent import Agent
+from gym_robotics_custom import make_test_env
 from dataset import _open
 
 
-def no_joint_state(self, prompts, joint_pos):
-    """_add_joint_state with the joints left out: image + language only."""
-    return list(prompts)
+def make_prev_action_test_env(*args, **kwargs):
+    """make_test_env whose joint_pos is the last action sent."""
+    return prev_action.PreviousActionWrapper(make_test_env(*args, **kwargs))
 
 
 class JitterRenderer:
@@ -71,7 +75,8 @@ class JitterRenderer:
 
 
 if __name__ == "__main__":
-    vlm_module.VisionLanguageModel._add_joint_state = no_joint_state
+    vlm_module.VisionLanguageModel._add_joint_state = prev_action.previous_action_state
+    agent_module.make_test_env = make_prev_action_test_env  # Agent.test builds its env through this name
     data_root = "/data/datasets/franka-kitchen-v2"
     task_dirs = os.environ["TASK_DIRS"].split(":")
     copies = 2  # jittered copies per demo, on top of the original
@@ -91,4 +96,6 @@ if __name__ == "__main__":
             agent.dataset.add_episode(jitter.render_episode(data["qpos"], jitter.sample_pose()), data)
         print(f"Jittered copy {copy + 1}/{copies} done, {agent.dataset.mem_ctr} rows, {time.time() - start:.0f}s", flush=True)
 
+    agent.dataset.sample_batch = functools.partial(prev_action.previous_action_batch, agent.dataset,
+                                                   agent.dataset.sample_batch)
     agent.train(epochs=10000, batch_size=64)  # 3x the rows; at 5000 the done head was still at 0.1-0.2 loss
