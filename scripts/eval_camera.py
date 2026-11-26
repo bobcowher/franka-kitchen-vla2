@@ -48,6 +48,7 @@ os.makedirs("checkpoints", exist_ok=True)
 urllib.request.urlretrieve(os.environ["CHECKPOINT_URL"], "checkpoints/policy.pth")
 agent = Agent(eval=True, max_buffer_size=1)
 agent.vlm.load_the_model("checkpoints/policy.pth")
+agent.done_patience = 8  # run 144: patience 8 turned hinge early stops at moved cameras into deployed ones
 
 table = []
 for name, field, offset in POSES:
