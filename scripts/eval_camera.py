@@ -1,4 +1,4 @@
-"""Experiment: stricter stop rules on hinge cabinet at the poses where seed 2 (run 140) stopped early (run 143).
+"""Experiment: top burner stop types under stricter stop rules; patience 8 dropped burner deployed from 19 to 2 at base (run 145).
 
 Env: CHECKPOINT_URL (a policy checkpoint to fetch). Train wording only, ROLLOUTS per task per pose.
 """
@@ -20,10 +20,10 @@ from tasks import TASKS
 
 ROLLOUTS = 20
 # (name, field, offset): azimuth/elevation in degrees, distance in metres, lookat in metres along world x.
-POSES = [("base", None, 0), ("az+5", "azimuth", 5), ("el-5", "elevation", -5), ("look_x-0.05", "lookat", -0.05)]
-TASK = "hinge cabinet"
-# (done_threshold, done_patience); run 143 was the default (0.5, 2).
-RULES = [(0.5, 4), (0.5, 8), (0.8, 2)]
+POSES = [("base", None, 0), ("look_x-0.05", "lookat", -0.05)]
+TASK = "top burner"
+# (done_threshold, done_patience); the default is (0.5, 2).
+RULES = [(0.5, 2), (0.5, 4), (0.5, 8)]
 camera = dict(DEFAULT_CAMERA_CONFIG)
 
 
