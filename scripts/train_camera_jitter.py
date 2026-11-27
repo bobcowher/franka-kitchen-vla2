@@ -91,7 +91,9 @@ if __name__ == "__main__":
     steps = sum(len(_open(f)["action"]) for f in shards)
     print(f"{len(shards)} demos, {steps} steps; {copies} jittered copies -> {steps * (copies + 1)} rows", flush=True)
 
-    agent = Agent(data_path=f"{data_root}/{task_dirs[0]}", max_buffer_size=steps * (copies + 1))
+    # grad_accum 2: the done pass with grad peaks at 24.8 GiB at batch 64, over the 3090.
+    agent = Agent(data_path=f"{data_root}/{task_dirs[0]}", max_buffer_size=steps * (copies + 1), grad_accum_steps=2)
+    agent.vlm.done_grad_scale = 0.1  # run 149: joint-free done features miss the microwave door angle
     for task_dir in task_dirs[1:]:
         agent.dataset.load_data(path=f"{data_root}/{task_dir}")
 

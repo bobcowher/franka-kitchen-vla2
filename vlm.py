@@ -14,7 +14,7 @@ JOINT_MAX = torch.tensor([ 2.2670, -0.9490,  2.5636, -0.3810,  1.5339,  2.1493, 
 
 class VisionLanguageModel:
 
-    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32, image_splitting=False):
+    def __init__(self, vlm_config, num_actions, chunk_size=1, done_hidden_dim=756, control_hidden_dim=756, lora_rank=16, lora_alpha=32, image_splitting=False, done_grad_scale=0.0):
 
         torch.manual_seed(123)
 
@@ -23,6 +23,7 @@ class VisionLanguageModel:
         self.num_actions = num_actions
         self.chunk_size = chunk_size
         self.image_splitting = image_splitting  # tile images above 512 into 512 crops plus a global view
+        self.done_grad_scale = done_grad_scale  # fraction of done's gradient that reaches the LoRA through the joint-free pass
         self.processor = AutoProcessor.from_pretrained(
                 self.config["model_id"],
                 revision=self.config["revision"]
@@ -106,9 +107,13 @@ class VisionLanguageModel:
         """Action chunks from image, prompt and joints; done logits from a second pass without the joints."""
         outputs = self._run(images, self._add_joint_state(prompts, joint_pos))
         actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
-        # Without the joint text done cannot fire on arm pose alone; no_grad keeps its loss off the backbone.
-        with torch.no_grad():
+        # Without the joint text done cannot fire on arm pose alone; the LoRA gets done_grad_scale of its gradient.
+        if self.done_grad_scale:
             features = self._run(images, prompts).hidden_states[-1][:, -1, :]
+            features = features.detach() + self.done_grad_scale * (features - features.detach())
+        else:
+            with torch.no_grad():
+                features = self._run(images, prompts).hidden_states[-1][:, -1, :]
         done = self.model.done_head(features).squeeze(-1)
         return actions, done
 
