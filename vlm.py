@@ -103,9 +103,18 @@ class VisionLanguageModel:
 
 
     def forward(self, images, prompts, joint_pos):
-        """Action chunks and done logits, both from one pass of the backbone."""
-        prompts = self._add_joint_state(prompts, joint_pos)
+        """Action chunks from image, prompt and joints; done logits from a second pass without the joints."""
+        outputs = self._run(images, self._add_joint_state(prompts, joint_pos))
+        actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
+        # Without the joint text done cannot fire on arm pose alone; no_grad keeps its loss off the backbone.
+        with torch.no_grad():
+            features = self._run(images, prompts).hidden_states[-1][:, -1, :]
+        done = self.model.done_head(features).squeeze(-1)
+        return actions, done
 
+
+    def _run(self, images, prompts):
+        """One backbone pass over image + prompt; returns the HF outputs with hidden states."""
         text_batch = []
 
         for prompt in prompts:
@@ -134,10 +143,7 @@ class VisionLanguageModel:
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             outputs = self.model(**inputs, output_hidden_states=True)
 
-        actions = outputs.logits[:, -1, :].float().view(len(prompts), self.chunk_size, self.num_actions)
-        # detach keeps done's loss from reaching the backbone, so it can't disturb the action weights.
-        done = self.model.done_head(outputs.hidden_states[-1][:, -1, :].detach()).squeeze(-1)
-        return actions, done
+        return outputs
 
 
     @torch.no_grad
